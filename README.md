@@ -32,7 +32,7 @@ Cesium Ion 的第三方默认访问令牌已从随仓库打包的 Mars3D/Cesium 
 
 发布范围是上述当前前端、Spring Boot 后端和 AI 层，不包含旧的重复后端仓库。项目原创部分采用 Apache License 2.0，详见根目录 `LICENSE`；Yuxi 前端、RuoYi-Vue-Plus 框架和 RAGFlow-style parser 的第三方许可与署名见 `THIRD_PARTY_NOTICES.md`。第三方字体二进制因公开再分发权限未确认而从候选中移除，前端使用系统字体栈。
 
-当前工作树没有配置 GitHub remote，尚未发布。完整 Spring Boot 业务服务运行仍缺 PostgreSQL/Redis 实例、业务 schema 与初始化数据；这些不影响独立 Maven 构建，但意味着业务后端的本机运行验收尚未通过。外部 Provider 也需在本机配置后再做真实模型验收。
+公开仓库地址为 `https://github.com/goat0330/geo-guard-platform`。完整 Spring Boot 业务服务运行仍缺 PostgreSQL/Redis 实例、业务 schema 与初始化数据；这些不影响独立 Maven 构建，但意味着业务后端的本机运行验收尚未通过。外部 Provider 也需在本机配置后再做真实模型验收。
 
 ## 当前验证
 
