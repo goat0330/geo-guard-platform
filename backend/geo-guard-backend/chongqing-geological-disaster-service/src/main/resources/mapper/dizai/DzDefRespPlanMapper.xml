@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+    PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.edu.pku.whai.geological.disaster.service.mapper.DzDefRespPlanMapper">
+
+    <select id="selectCirculatingTownStats"
+            resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.DefRespTownStatItemVo">
+        WITH town_scope AS (
+            SELECT DISTINCT
+                   level,
+                   county,
+                   trim(streets) AS street
+            FROM dz_def_resp_plan
+            WHERE type = 2
+              AND region_scope_type = 2
+              AND COALESCE(deleted, 0) = 0
+              AND streets IS NOT NULL
+              AND trim(streets) != ''
+              <choose>
+                  <when test="filterByParent">
+                      AND parent_def_id = #{parentDefId}
+                      AND status IN (1, 2, 3, 4, 5, 6)
+                      AND execute_status IN (0, 1, 3)
+                  </when>
+                  <otherwise>
+                      AND status IN (1, 2, 3, 4, 5)
+                      AND execute_status IN (0, 1)
+                      AND close_time IS NULL
+                  </otherwise>
+              </choose>
+        ),
+        town_stats AS (
+            SELECT level,
+                   COUNT(*) AS town_count
+            FROM town_scope
+            GROUP BY GROUPING SETS ((level), ())
+        ),
+        area_stats AS (
+            SELECT ts.level,
+                   SUM(COALESCE(ar.area, 0)) AS area_square_kilometer
+            FROM town_scope ts
+                     LEFT JOIN data_ad_region ar
+                               ON ar.level = 4
+                                  AND ar.county = ts.county
+                                  AND ar.street = ts.street
+            GROUP BY GROUPING SETS ((ts.level), ())
+        ),
+        disaster_stats AS (
+            SELECT ts.level,
+                   COUNT(DISTINCT COALESCE(NULLIF(hp.unique_disaster_id, ''), hp.id)) AS disaster_point_count
+            FROM town_scope ts
+                     LEFT JOIN data_hazard_point hp
+                               ON hp.street = ts.street
+                                  AND COALESCE(hp.is_cancelled, 0) = 0
+            GROUP BY GROUPING SETS ((ts.level), ())
+        )
+        SELECT t.level,
+               COALESCE(t.town_count, 0) AS town_count,
+               COALESCE(a.area_square_kilometer, 0) AS area_square_kilometer,
+               0 AS population_ten_thousand,
+               COALESCE(d.disaster_point_count, 0) AS disaster_point_count
+        FROM town_stats t
+                 LEFT JOIN area_stats a ON a.level IS NOT DISTINCT FROM t.level
+                 LEFT JOIN disaster_stats d ON d.level IS NOT DISTINCT FROM t.level
+        ORDER BY t.level DESC NULLS FIRST
+    </select>
+
+    <select id="selectCirculatingTownScopes"
+            resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.DefRespTownScopeVo">
+        SELECT level,
+               status,
+               execute_status,
+               create_date,
+               update_date,
+               county,
+               street
+        FROM (
+            SELECT level,
+                   status,
+                   execute_status,
+                   create_date,
+                   update_date,
+                   county,
+                   trim(streets) AS street,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY level, county, trim(streets)
+                       ORDER BY update_date DESC NULLS LAST, id DESC
+                   ) AS rn
+            FROM dz_def_resp_plan
+            WHERE type = 2
+              AND region_scope_type = 2
+              AND COALESCE(deleted, 0) = 0
+              AND streets IS NOT NULL
+              AND trim(streets) != ''
+              <choose>
+                  <when test="filterByParent">
+                      AND parent_def_id = #{parentDefId}
+                      AND status IN (1, 2, 3, 4, 5, 6)
+                      AND execute_status IN (0, 1, 3)
+                  </when>
+                  <otherwise>
+                      AND status IN (1, 2, 3, 4, 5)
+                      AND execute_status IN (0, 1)
+                      AND close_time IS NULL
+                  </otherwise>
+              </choose>
+        ) t
+        WHERE rn = 1
+    </select>
+
+    <select id="selectCirculatingCountyLevel" resultType="java.lang.Integer">
+        SELECT level
+        FROM dz_def_resp_plan
+        WHERE type = 2
+          AND region_scope_type = 1
+          AND status IN (1, 2, 3, 4, 5)
+          AND COALESCE(deleted, 0) = 0
+          AND COALESCE(execute_status, 0) NOT IN (2, 3)
+          AND close_time IS NULL
+        ORDER BY update_date DESC, id DESC
+        LIMIT 1
+    </select>
+
+</mapper>

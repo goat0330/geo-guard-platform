@@ -1,0 +1,185 @@
+.event-detail-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 20px 0 0 20px;
+  border: 1px solid #d5dbe0;
+  border-right: none;
+  background: #ffffff;
+  box-shadow: -4px 0 24px rgba(47, 95, 186, 0.12);
+  color: #222527;
+  font-family: 'AlibabaPuHuiTi', sans-serif;
+  box-sizing: border-box;
+  pointer-events: auto;
+}
+
+.detail-header {
+  flex: 0 0 57px;
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  box-sizing: border-box;
+  background: url('@/assets/imgs/fupan/detail.png') center / 120% 120% no-repeat;
+  border-radius: 20px 0 0 0;
+
+  h1 {
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    color: #222527;
+    font-size: 18px;
+    font-style: normal;
+    font-weight: 700;
+    line-height: 18px;
+    white-space: nowrap;
+    text-align: justify;
+    text-overflow: ellipsis;
+  }
+
+  .close-btn {
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+    padding: 6px;
+    border: 0;
+    background: transparent;
+    color: #383c41;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    transition: background 0.2s ease;
+
+    &:hover {
+      background: rgba(0, 0, 0, 0.05);
+    }
+
+    .icon-close {
+      font-size: 16px;
+    }
+  }
+}
+
+.header-title-wrap {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.review-status {
+  flex: 0 0 54px;
+  width: 54px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  box-sizing: border-box;
+  border-radius: 4px;
+  background: rgba(0, 123, 255, 0.16);
+  color: #007bff;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 10px;
+  white-space: nowrap;
+
+  .status-dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #007bff;
+    flex-shrink: 0;
+  }
+}
+
+.detail-content {
+  flex: 1;
+  min-height: 0;
+  padding: 16px 20px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.detail-content::-webkit-scrollbar {
+  width: 4px;
+}
+
+.detail-content::-webkit-scrollbar-thumb {
+  border-radius: 2px;
+  background: #d6dee8;
+}
+
+.detail-footer {
+  flex: 0 0 80px;
+  padding: 16px 20px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  border-top: 1px solid #d5dbe0;
+  border-radius: 0 0 0 20px;
+  background: #ffffff;
+
+  .btn-action {
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border-radius: 8px;
+    font-size: 16px;
+    font-weight: 700;
+    cursor: pointer;
+    box-sizing: border-box;
+    transition: all 0.2s ease;
+
+    .btn-icon {
+      width: 16px;
+      height: 16px;
+    }
+  }
+
+  .btn-secondary {
+    border: 1px solid #007bff;
+    background: #ffffff;
+    color: #007bff;
+
+    &:hover {
+      background: rgba(0, 123, 255, 0.06);
+    }
+  }
+
+  .btn-primary {
+    border: 1px solid #007bff;
+    background: #007bff;
+    color: #ffffff;
+
+    &:hover {
+      background: #006fe6;
+      border-color: #006fe6;
+    }
+
+    &:disabled {
+      opacity: 0.7;
+      cursor: not-allowed;
+    }
+  }
+}
+
+.is-loading {
+  animation: rotate 1s linear infinite;
+}
+
+@keyframes rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}

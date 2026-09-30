@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- @author kongweiguang -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.edu.pku.whai.geological.disaster.data.mapper.AdRegionMapper">
+
+    <select id="selectTreeList" resultType="cn.edu.pku.whai.geological.disaster.data.domain.vo.AdRegionVo">
+        SELECT id,
+               pcode,
+               name,
+               level,
+               level_name,
+               province,
+               city,
+               county,
+               street,
+               village,
+               community,
+               center,
+               <if test="withWkt != null and withWkt">
+                   wkt,
+               </if>
+               area
+        FROM data_ad_region
+    </select>
+
+    <select id="selectUserRegionList" resultType="cn.edu.pku.whai.geological.disaster.data.domain.vo.AdRegionVo">
+        SELECT dar.id,
+               dar.pcode,
+               dar.name,
+               dar.level,
+               dar.level_name,
+               dar.province,
+               dar.city,
+               dar.county,
+               dar.street,
+               dar.village,
+               dar.community,
+               dar.center,
+               dar.area
+        FROM data_ad_region dar
+                 INNER JOIN dz_user_ad_region durar ON dar.id = durar.ad_region_id
+        WHERE durar.user_id = #{userId}
+          AND durar.del_flag = '0'
+    </select>
+
+    <select id="selectVoPage1" resultType="cn.edu.pku.whai.geological.disaster.data.domain.vo.AdRegionVo">
+        SELECT id,
+               pcode,
+               name,
+               level,
+               level_name,
+               province,
+               city,
+               county,
+               street,
+               village,
+               community,
+               center,
+               area,
+               ST_AsText(ST_Simplify(geom, #{simpWktLevel})) AS wkt
+        FROM data_ad_region
+        ${ew.customSqlSegment}
+    </select>
+
+    <select id="getUserRegion" resultType="cn.edu.pku.whai.geological.disaster.data.domain.vo.AdRegionVo">
+        SELECT id,
+               pcode,
+               name,
+               level,
+               level_name,
+               province,
+               city,
+               county,
+               street,
+               village,
+               community,
+               center,
+               area
+        FROM data_ad_region
+                 LEFT JOIN dz_user_ad_region ON data_ad_region.id = dz_user_ad_region.ad_region_id
+        WHERE dz_user_ad_region.user_id = #{userId}
+          AND dz_user_ad_region.del_flag = '0'
+    </select>
+</mapper>

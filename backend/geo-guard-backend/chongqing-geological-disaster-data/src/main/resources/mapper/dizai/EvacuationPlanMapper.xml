@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- @author kongweiguang -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.edu.pku.whai.geological.disaster.data.mapper.EvacuationPlanMapper">
+
+    <!-- 撤离方案 VO 结果映射，evacuation_road 通过 ST_AsText 转为 WKT 字符串 -->
+    <resultMap id="EvacuationPlanVoResult" type="cn.edu.pku.whai.geological.disaster.data.domain.vo.EvacuationPlanVo">
+        <id property="id" column="id"/>
+        <result property="handleId" column="handle_id"/>
+        <result property="evacuationArea" column="evacuation_area"/>
+        <result property="evacuationAreaWkt" column="evacuation_area_wkt"/>
+        <result property="resettlementLocation" column="resettlement_location"/>
+        <result property="distanceKm" column="distance_km"/>
+        <result property="estimatedTimeMinutes" column="estimated_time_minutes"/>
+        <result property="evacuationRoute" column="evacuation_route"/>
+        <result property="evacuationRoad" column="evacuation_road"/>
+        <result property="evacuationAreaToRoad" column="evacuation_area_to_road"/>
+        <result property="roadToResettlement" column="road_to_resettlement"/>
+        <result property="createTime" column="create_time"/>
+        <result property="resettlementWkt" column="resettlement_wkt"/>
+        <result property="resettlementPoint" column="resettlement_point"/>
+        <result property="residentsInfo" column="residents_info"/>
+    </resultMap>
+
+    <!-- 公共查询列：geometry 用 ST_AsText 转 WKT -->
+    <sql id="EvacuationPlanVo_Column_List">
+        id, handle_id, evacuation_area, evacuation_area_wkt,
+        resettlement_location, distance_km, estimated_time_minutes, evacuation_route,
+        ST_AsText(evacuation_road) AS evacuation_road,
+        ST_AsText(evacuation_area_to_road) AS evacuation_area_to_road,
+        ST_AsText(road_to_resettlement) AS road_to_resettlement,
+        create_time, resettlement_wkt, resettlement_point, residents_info
+    </sql>
+
+    <select id="selectEvacuationPlanVoPage" resultMap="EvacuationPlanVoResult">
+        SELECT <include refid="EvacuationPlanVo_Column_List"/>
+        FROM "dz_evacuation_plan"
+        ${ew.customSqlSegment}
+    </select>
+
+    <select id="selectEvacuationPlanVoList" resultMap="EvacuationPlanVoResult">
+        SELECT <include refid="EvacuationPlanVo_Column_List"/>
+        FROM "dz_evacuation_plan"
+        ${ew.customSqlSegment}
+    </select>
+
+    <select id="selectEvacuationPlanVoById" resultMap="EvacuationPlanVoResult">
+        SELECT <include refid="EvacuationPlanVo_Column_List"/>
+        FROM "dz_evacuation_plan"
+        WHERE id = #{id}
+    </select>
+
+    <select id="selectSlopeTerrainByHandleId"
+            resultType="cn.edu.pku.whai.geological.disaster.data.domain.vo.EvacuationPlanSlopeTerrainVo">
+        SELECT su.slope_direction AS slopeDirection,
+               su.slope_angle AS slopeAngle
+        FROM dz_task_handle th
+        LEFT JOIN data_slope_unit su ON su.id = th.slope_unit_id
+        WHERE th.id = #{handleId}
+        LIMIT 1
+    </select>
+
+    <delete id="deleteByHandleId">
+        DELETE FROM "dz_evacuation_plan"
+        WHERE handle_id = #{handleId}
+    </delete>
+
+    <insert id="insertPlan">
+        INSERT INTO "dz_evacuation_plan"(
+            handle_id, evacuation_area, evacuation_area_wkt,
+            resettlement_location, distance_km, estimated_time_minutes, evacuation_route, evacuation_road,
+            evacuation_area_to_road, road_to_resettlement, create_time,
+            resettlement_wkt, resettlement_point, residents_info
+        ) VALUES (
+            #{plan.handleId},
+            #{plan.evacuationArea},
+            #{plan.evacuationAreaWkt},
+            #{plan.resettlementLocation},
+            #{plan.distanceKm},
+            #{plan.estimatedTimeMinutes},
+            #{plan.evacuationRoute},
+            <choose>
+                <when test="plan.evacuationRoad != null and plan.evacuationRoad != ''">
+                    ST_GeomFromText(#{plan.evacuationRoad}, 4490)
+                </when>
+                <otherwise>
+                    null
+                </otherwise>
+            </choose>,
+            <choose>
+                <when test="plan.evacuationAreaToRoad != null and plan.evacuationAreaToRoad != ''">
+                    ST_Multi(ST_GeomFromText(#{plan.evacuationAreaToRoad}, 4490))
+                </when>
+                <otherwise>
+                    null
+                </otherwise>
+            </choose>,
+            <choose>
+                <when test="plan.roadToResettlement != null and plan.roadToResettlement != ''">
+                    ST_Multi(ST_GeomFromText(#{plan.roadToResettlement}, 4490))
+                </when>
+                <otherwise>
+                    null
+                </otherwise>
+            </choose>,
+            #{plan.createTime},
+            #{plan.resettlementWkt},
+            #{plan.resettlementPoint},
+            #{plan.residentsInfo}
+        )
+    </insert>
+</mapper>

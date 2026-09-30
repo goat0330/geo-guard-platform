@@ -1,0 +1,35 @@
+# Local secrets and settings
+**/.env
+**/.env.*
+!**/.env.example
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+**/*.crt
+
+# Local data and generated files
+**/node_modules/
+**/.venv/
+**/target/
+**/dist/
+**/data/
+!frontend/geo-guard-fe/src/assets/data/
+!frontend/geo-guard-fe/src/assets/data/chongqing-boundary.json
+**/__pycache__/
+**/.pytest_cache/
+**/.langgraph_api/
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+
+# Local deployment and business data
+**/application*.yml
+**/application*.yaml
+**/application*.properties
+**/*.csv
+**/*.egg-info/
+
+# Maven Flatten generated output
+**/.flattened-pom.xml
+**/.flattened-pom.xml.versionsBackup

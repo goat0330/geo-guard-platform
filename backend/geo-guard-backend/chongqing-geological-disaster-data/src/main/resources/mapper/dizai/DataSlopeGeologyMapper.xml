@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- @author kongweiguang -->
+<!DOCTYPE mapper
+    PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.edu.pku.whai.geological.disaster.data.mapper.DataSlopeGeologyMapper">
+
+    <!--
+        根据斜坡单元id单次查询基础信息（data_slope_unit LEFT JOIN data_slope_geology）。
+        data_slope_geology 无对应记录时该侧字段全部为 null。
+        当同一 slope_unit_id 在 data_slope_geology 中存在多条历史记录时，按 id 降序取最新一条。
+    -->
+    <select id="selectBaseInfoById"
+            resultType="cn.edu.pku.whai.geological.disaster.data.domain.vo.SlopeUnitGeologyVo">
+        SELECT
+            u.id,
+            u.name,
+            concat(u.province, u.city, u.county, u.street, u.village) AS villageAddress,
+            u.center,
+            g.slope_type           AS slopeType,
+            g.water_river_valley   AS waterRiverValley,
+            g.landform_feature     AS landformFeature,
+            g.stratum_lithology    AS stratumLithology,
+            g.structure_feature    AS structureFeature,
+            g.hydrogeology,
+            g.land_vegetation      AS landVegetation,
+            g.control_structural_plane AS controlStructuralPlane,
+            g.stability_factors    AS stabilityFactors,
+            g.stability_current    AS stabilityCurrent,
+            g.stability_trend      AS stabilityTrend
+        FROM data_slope_unit u
+        LEFT JOIN data_slope_geology g ON g.slope_unit_id = u.id
+        WHERE u.id = #{id}
+        ORDER BY g.id DESC
+        LIMIT 1
+    </select>
+
+</mapper>

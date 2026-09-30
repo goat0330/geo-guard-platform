@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- @author kongweiguang -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.edu.pku.whai.geological.disaster.service.mapper.DzRiskAssessmentMapper">
+    <sql id="pilotAreaFilter">
+        <if test="bo.pilotArea1 != null">
+            AND t2.pilot_area_1 = #{bo.pilotArea1}
+        </if>
+        <if test="bo.pilotArea2 != null">
+            AND t2.pilot_area_2 = #{bo.pilotArea2}
+        </if>
+    </sql>
+
+    <sql id="adRegionIdsFilter">
+        <if test="bo.adRegionIds != null and bo.adRegionIds.size > 0">
+            AND (
+                t2.province_code IN
+                <foreach collection="bo.adRegionIds" item="adRegionId" open="(" separator="," close=")">
+                    #{adRegionId}
+                </foreach>
+                OR t2.city_code IN
+                <foreach collection="bo.adRegionIds" item="adRegionId" open="(" separator="," close=")">
+                    #{adRegionId}
+                </foreach>
+                OR t2.county_code IN
+                <foreach collection="bo.adRegionIds" item="adRegionId" open="(" separator="," close=")">
+                    #{adRegionId}
+                </foreach>
+                OR t2.street_code IN
+                <foreach collection="bo.adRegionIds" item="adRegionId" open="(" separator="," close=")">
+                    #{adRegionId}
+                </foreach>
+                OR t2.village_code IN
+                <foreach collection="bo.adRegionIds" item="adRegionId" open="(" separator="," close=")">
+                    #{adRegionId}
+                </foreach>
+            )
+        </if>
+    </sql>
+
+    <select id="statMonitDevice" resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.StatRiskVo">
+        SELECT risk_unit.dynamic_risk_level,
+        CAST(COUNT(*) AS INTEGER) AS count
+        FROM (
+            SELECT DISTINCT t1.slope_unit_id,
+            t1.dynamic_risk_level
+            FROM dz_risk_assessment t1
+            LEFT JOIN data_slope_unit t2
+            ON t1.slope_unit_id = t2.id
+            LEFT JOIN v_monitor_device t3 ON t3.slope_unit_id = t2.id
+            WHERE 1 = 1
+            <include refid="pilotAreaFilter"/>
+            <include refid="adRegionIdsFilter"/>
+            AND t1.dynamic_risk_level IN (3, 4)
+            AND t1.create_date BETWEEN #{startTime} AND #{endTime}
+            <if test="bo.province != null and bo.province != ''">
+                AND t2.province = #{bo.province}
+            </if>
+            <if test="bo.city != null and bo.city != ''">
+                AND t2.city = #{bo.city}
+            </if>
+            <if test="bo.county != null and bo.county != ''">
+                AND t2.county = #{bo.county}
+            </if>
+            <if test="bo.street != null and bo.street != ''">
+                AND t2.street = #{bo.street}
+            </if>
+            <if test="bo.village != null and bo.village != ''">
+                AND t2.village = #{bo.village}
+            </if>
+        ) risk_unit
+        GROUP BY risk_unit.dynamic_risk_level
+    </select>
+
+    <select id="statRisk" resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.StatRiskVo">
+        SELECT risk_unit.dynamic_risk_level,
+        CAST(COUNT(*) AS INTEGER) AS count
+        FROM (
+            SELECT DISTINCT t1.slope_unit_id,
+            t1.dynamic_risk_level
+            FROM dz_risk_assessment t1
+            LEFT JOIN data_slope_unit t2 ON t1.slope_unit_id = t2.id
+            WHERE 1 = 1
+            <include refid="pilotAreaFilter"/>
+            <include refid="adRegionIdsFilter"/>
+            AND t1.create_date BETWEEN #{startTime} AND #{endTime}
+            <if test="bo.province != null and bo.province != ''">
+                AND t2.province = #{bo.province}
+            </if>
+            <if test="bo.city != null and bo.city != ''">
+                AND t2.city = #{bo.city}
+            </if>
+            <if test="bo.county != null and bo.county != ''">
+                AND t2.county = #{bo.county}
+            </if>
+            <if test="bo.street != null and bo.street != ''">
+                AND t2.street = #{bo.street}
+            </if>
+            <if test="bo.village != null and bo.village != ''">
+                AND t2.village = #{bo.village}
+            </if>
+        ) risk_unit
+        GROUP BY risk_unit.dynamic_risk_level
+    </select>
+
+    <select id="statHazardPoint" resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.StatRiskVo">
+        SELECT risk_unit.dynamic_risk_level,
+        CAST(COUNT(DISTINCT hazard_point.id) AS INTEGER) AS count
+        FROM (
+            SELECT DISTINCT t1.slope_unit_id,
+            t1.dynamic_risk_level
+            FROM dz_risk_assessment t1
+            LEFT JOIN data_slope_unit t2 ON t1.slope_unit_id = t2.id
+            WHERE 1 = 1
+            <include refid="pilotAreaFilter"/>
+            <include refid="adRegionIdsFilter"/>
+            AND t1.create_date BETWEEN #{startTime} AND #{endTime}
+            <if test="bo.province != null and bo.province != ''">
+                AND t2.province = #{bo.province}
+            </if>
+            <if test="bo.city != null and bo.city != ''">
+                AND t2.city = #{bo.city}
+            </if>
+            <if test="bo.county != null and bo.county != ''">
+                AND t2.county = #{bo.county}
+            </if>
+            <if test="bo.street != null and bo.street != ''">
+                AND t2.street = #{bo.street}
+            </if>
+            <if test="bo.village != null and bo.village != ''">
+                AND t2.village = #{bo.village}
+            </if>
+        ) risk_unit
+        LEFT JOIN data_hazard_point hazard_point ON hazard_point.slope_unit_id = risk_unit.slope_unit_id
+        GROUP BY risk_unit.dynamic_risk_level
+    </select>
+
+    <select id="statArea" resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.StatAreaVo">
+        SELECT risk_unit.dynamic_risk_level,
+        risk_unit.areaName,
+        CAST(COUNT(*) AS INTEGER) AS count
+        FROM (
+            SELECT DISTINCT
+            t1.slope_unit_id,
+            t1.dynamic_risk_level,
+            <choose>
+                <when test="bo.village != null and bo.village != ''">COALESCE(t2.village, 'Unknown')</when>
+                <when test="bo.street != null and bo.street != ''">COALESCE(t2.village, 'Unknown')</when>
+                <when test="bo.county != null and bo.county != ''">COALESCE(t2.street, 'Unknown')</when>
+                <when test="bo.city != null and bo.city != ''">COALESCE(t2.county, 'Unknown')</when>
+                <when test="bo.province != null and bo.province != ''">COALESCE(t2.city, 'Unknown')</when>
+                <otherwise>COALESCE(t2.province, 'Unknown')</otherwise>
+            </choose>
+            AS areaName
+            FROM dz_risk_assessment t1
+            LEFT JOIN data_slope_unit t2 ON t1.slope_unit_id = t2.id
+            WHERE 1 = 1
+            <include refid="pilotAreaFilter"/>
+            <include refid="adRegionIdsFilter"/>
+            AND t1.dynamic_risk_level IN (3, 4)
+            AND t1.create_date BETWEEN #{startTime} AND #{endTime}
+            <if test="bo.province != null and bo.province != ''">
+                AND t2.province = #{bo.province}
+            </if>
+            <if test="bo.city != null and bo.city != ''">
+                AND t2.city = #{bo.city}
+            </if>
+            <if test="bo.county != null and bo.county != ''">
+                AND t2.county = #{bo.county}
+            </if>
+            <if test="bo.street != null and bo.street != ''">
+                AND t2.street = #{bo.street}
+            </if>
+            <if test="bo.village != null and bo.village != ''">
+                AND t2.village = #{bo.village}
+            </if>
+        ) risk_unit
+        GROUP BY risk_unit.dynamic_risk_level, risk_unit.areaName
+    </select>
+
+    <select id="statAttribution" resultType="map">
+        SELECT risk_unit.dynamic_risk_level,
+        risk_unit.suggest
+        FROM (
+            SELECT
+            t1.dynamic_risk_level,
+            t1.dynamic_risk_suggest AS suggest,
+            ROW_NUMBER() OVER (
+                PARTITION BY t1.slope_unit_id, t1.dynamic_risk_level
+                ORDER BY t1.create_date DESC, t1.id DESC
+            ) AS rn
+            FROM dz_risk_assessment t1
+            LEFT JOIN data_slope_unit t2 ON t1.slope_unit_id = t2.id
+            WHERE 1 = 1
+            <include refid="pilotAreaFilter"/>
+            <include refid="adRegionIdsFilter"/>
+            AND t1.dynamic_risk_level IN (3, 4)
+            AND t1.create_date BETWEEN #{startTime} AND #{endTime}
+            AND t1.dynamic_risk_suggest IS NOT NULL
+            AND t1.dynamic_risk_suggest != ''
+            <if test="bo.province != null and bo.province != ''">
+                AND t2.province = #{bo.province}
+            </if>
+            <if test="bo.city != null and bo.city != ''">
+                AND t2.city = #{bo.city}
+            </if>
+            <if test="bo.county != null and bo.county != ''">
+                AND t2.county = #{bo.county}
+            </if>
+            <if test="bo.street != null and bo.street != ''">
+                AND t2.street = #{bo.street}
+            </if>
+            <if test="bo.village != null and bo.village != ''">
+                AND t2.village = #{bo.village}
+            </if>
+        ) risk_unit
+        WHERE risk_unit.rn = 1
+    </select>
+
+    <select id="statAreaTop3" resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.RiskChatBannerVo$RiskChatBannerItemVo">
+        select dsu.village name, dsu.village_code code
+        from (
+                 select t2.village,
+                        t2.village_code,
+                        count(*) count
+                 from dz_risk_assessment t1
+                          left join data_slope_unit t2 on t1.slope_unit_id = t2.id
+                 where 1 = 1
+                   <include refid="pilotAreaFilter"/>
+                   <include refid="adRegionIdsFilter"/>
+                   and t1.dynamic_risk_level in (3, 4)
+                   and t1.create_date between #{startTime} and #{endTime}
+                 <if test="bo.province != null and bo.province != ''">
+                     and t2.province = #{bo.province}
+                 </if>
+                 <if test="bo.city != null and bo.city != ''">
+                     and t2.city = #{bo.city}
+                 </if>
+                 <if test="bo.county != null and bo.county != ''">
+                     and t2.county = #{bo.county}
+                 </if>
+                 <if test="bo.street != null and bo.street != ''">
+                     and t2.street = #{bo.street}
+                 </if>
+                 <if test="bo.village != null and bo.village != ''">
+                     and t2.village = #{bo.village}
+                 </if>
+                 group by t2.village, t2.village_code
+                 order by count desc
+                 limit 3
+             ) dsu
+    </select>
+
+    <select id="statHazard" resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.RiskHazardQueryVo">
+        SELECT DATE (create_date) AS date, hazard, risk, hazard_level AS hazardLevel, risk_level AS riskLevel
+        FROM (
+            SELECT t1.create_date, t1.hazard, t1.risk, t1.hazard_level, t1.risk_level, ROW_NUMBER() OVER (PARTITION BY DATE (t1.create_date) ORDER BY t1.create_date DESC) AS rn
+            FROM dz_risk_assessment t1
+            LEFT JOIN data_slope_unit t2 ON t1.slope_unit_id = t2.id
+            WHERE t1.slope_unit_id = #{bo.slopeUnitId}
+            <include refid="pilotAreaFilter"/>
+            AND t1.create_date BETWEEN #{startTime} AND #{endTime}
+        ) t
+        WHERE rn = 1
+        ORDER BY date
+    </select>
+
+</mapper>

@@ -1,0 +1,1 @@
+import{I as e,N as t,yt as n}from"./_plugin-vue_export-helper-DcwOH4Fu.js";function r(r,i=[]){let a=e=>{if(!n(r))return;let t=e.composedPath();i.some(e=>n(e)&&t.includes(n(e)))||(r.value=!1)};e(()=>document.addEventListener(`pointerdown`,a,!0)),t(()=>document.removeEventListener(`pointerdown`,a,!0))}export{r as t};

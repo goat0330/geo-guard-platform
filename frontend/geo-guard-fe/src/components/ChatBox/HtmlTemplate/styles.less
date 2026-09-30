@@ -1,0 +1,85 @@
+.template-tip-text {
+  color: #878898;
+  font-size: 14px;
+  line-height: 20px;
+  text-align: justify;
+}
+.template-tip-gap {
+  margin-bottom: 20px;
+}
+.template-tip-title {
+  color: #222529;
+  line-height: 20px;
+  font-size: 14px;
+  text-align: justify;
+  font-weight: 800;
+}
+.template-title {
+  color: #222529;
+  text-align: justify;
+  font-weight: 800;
+  font-size: 14px;
+  margin-bottom: 14px;
+  white-space: pre-wrap;
+  line-height: 24px;
+}
+
+.template-text {
+  font-size: 14px;
+  color: #222529;
+  text-align: justify;
+}
+
+.template-tip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  .template-tip-item {
+    font-size: 14px;
+    color: #222529;
+    margin-left: 10px;
+    display: flex;
+
+    .point {
+      flex-shrink: 0;
+      width: 4px;
+      height: 4px;
+      background: #222529;
+      border-radius: 50%;
+      margin-right: 10px;
+      margin-top: 5px;
+    }
+  }
+}
+
+.template-tip-point-item {
+  display: flex;
+  gap: 10px;
+  color: #222529;
+  text-align: justify;
+  font-size: 14px;
+  margin-left: 10px;
+
+  &::before {
+    content: '';
+    width: 4px;
+    height: 4px;
+    background-color: #222529;
+    position: relative;
+    top: 7px;
+    border-radius: 50%;
+  }
+}
+
+.text-blue {
+  color: #3561FA;
+}
+
+.text-orange {
+  color: #FF8409;
+}
+
+.text-bold {
+  font-weight: 800;
+}

@@ -1,0 +1,1 @@
+var e=e=>e.length>=8;export{e as t};

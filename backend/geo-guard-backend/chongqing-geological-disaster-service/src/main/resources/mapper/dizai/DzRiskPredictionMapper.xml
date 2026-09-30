@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- @author kongweiguang -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.edu.pku.whai.geological.disaster.service.mapper.DzRiskPredictionMapper">
+
+    <resultMap id="SlopeUnitAutoMap"
+               type="cn.edu.pku.whai.geological.disaster.data.domain.vo.SlopeUnitVo"
+               autoMapping="true">
+        <id property="id" column="id"/>
+    </resultMap>
+
+    <resultMap id="DzRiskPredictionVoWithSlopeUnitMap"
+               type="cn.edu.pku.whai.geological.disaster.service.domain.vo.DzRiskPredictionVo"
+               autoMapping="true">
+        <id property="id" column="id"/>
+        <association property="slopeUnit"
+                     resultMap="SlopeUnitAutoMap"
+                     columnPrefix="t2_"/>
+    </resultMap>
+
+    <select id="selectVoPageWithSlopeUnit" resultMap="DzRiskPredictionVoWithSlopeUnitMap">
+        select t1.*,
+               t2.id                 as t2_id,
+               t2.name               as t2_name,
+               t2.pilot_area_1       as t2_pilot_area_1,
+               t2.pilot_area_2       as t2_pilot_area_2,
+               t2.urban_area         as t2_urban_area,
+               t2.province           as t2_province,
+               t2.city               as t2_city,
+               t2.county             as t2_county,
+               t2.street             as t2_street,
+               t2.village            as t2_village,
+               t2.community          as t2_community,
+               t2.center             as t2_center,
+               t2.wkt                as t2_wkt,
+               t2.area               as t2_area,
+               t2.province_code      as t2_province_code,
+               t2.city_code          as t2_city_code,
+               t2.county_code        as t2_county_code,
+               t2.street_code        as t2_street_code,
+               t2.village_code       as t2_village_code
+        from dz_risk_prediction t1
+                 left join data_slope_unit t2
+                           on t1.slope_unit_id = t2.id
+            ${ew.customSqlSegment}
+    </select>
+</mapper>

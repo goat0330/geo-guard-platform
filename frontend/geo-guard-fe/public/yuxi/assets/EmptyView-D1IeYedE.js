@@ -1,0 +1,1 @@
+import{f as e,h as t,t as n,z as r}from"./_plugin-vue_export-helper-DcwOH4Fu.js";var i={},a={class:`not-found`};function o(n,i){return r(),t(`div`,a,[...i[0]||=[e(`h1`,null,`404 - 页面还没做`,-1),e(`p`,null,`Sorry, Yemian has not been zuoed.`,-1)]])}var s=n(i,[[`render`,o],[`__scopeId`,`data-v-32cbc26e`]]);export{s as default};

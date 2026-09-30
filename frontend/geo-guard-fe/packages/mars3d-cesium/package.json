@@ -1,0 +1,40 @@
+{
+	"name": "mars3d-cesium",
+	"version": "1.132.1",
+	"description": "CesiumJS是一个JavaScript库，用于在web浏览器中无需插件创建3D地球仪和2D地图，mars3d-cesium是火星科技修改版本的CesiumJS。",
+	"type": "module",
+	"main": "Build/Cesium/index.js",
+	"module": "Build/Cesium/index.js",
+	"types": "Build/Cesium/Cesium.d.ts",
+	"files": [
+		"Build/Cesium/"
+	],
+	"scripts": {
+		"push": "npm publish --registry=https://registry.npmjs.org"
+	},
+	"dependencies": {},
+	"devDependencies": {},
+	"engines": {
+		"node": ">=20.19.0"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/marsgis/mars3d"
+	},
+	"bugs": {
+		"url": "https://github.com/marsgis/mars3d/issues",
+		"email": "wh@marsgis.cn"
+	},
+	"keywords": [
+		"marsgis",
+		"mars3d",
+		"cesium",
+		"vue",
+		"vue3",
+		"gis",
+		"webgis"
+	],
+	"author": "火星科技",
+	"license": "Apache-2.0",
+	"homepage": "http://mars3d.cn"
+}

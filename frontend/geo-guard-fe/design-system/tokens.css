@@ -1,0 +1,71 @@
+:root {
+  /* Primary */
+  --gg-primary-050: #eff6ff;
+  --gg-primary-400: #3395ff;
+  --gg-primary-500: #007bff;
+
+  /* Text */
+  --gg-text-primary: #222527;
+  --gg-text-strong: #383c41;
+  --gg-text-secondary: #617185;
+  --gg-text-muted: #9096a2;
+  --gg-text-quiet: #a6acb8;
+
+  /* Surface / border */
+  --gg-page-bg: #f5f7fc;
+  --gg-surface: #ffffff;
+  --gg-surface-soft: #f7f9fc;
+  --gg-border: #dce3eb;
+  --gg-border-quiet: #e2e8f0;
+
+  /* Semantic */
+  --gg-danger: #dd4739;
+  --gg-danger-strong: #e23030;
+  --gg-warning: #ff922c;
+  --gg-amber: #ffbd63;
+  --gg-success: #34a46f;
+
+  /* Hazard review layers */
+  --gg-layer-hazard: #dd4739;
+  --gg-layer-grassroots: #ff922c;
+  --gg-layer-screening: #007bff;
+  --gg-relation-suspected: #7a6ff0;
+
+  /* Glass */
+  --gg-glass-light: rgba(241, 243, 252, 0.86);
+  --gg-glass-dark: rgba(69, 76, 88, 0.42);
+  --gg-glass-border: rgba(255, 255, 255, 0.72);
+  --gg-glass-border-dark: rgba(255, 255, 255, 0.42);
+
+  /* Font */
+  --gg-font-ui: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Segoe UI', Roboto, sans-serif;
+  --gg-font-metric: var(--gg-font-ui);
+
+  /* Spacing */
+  --gg-space-1: 4px;
+  --gg-space-2: 8px;
+  --gg-space-3: 12px;
+  --gg-space-4: 16px;
+  --gg-space-5: 20px;
+  --gg-space-6: 24px;
+  --gg-space-7: 28px;
+  --gg-space-8: 32px;
+
+  /* Radius */
+  --gg-radius-xs: 4px;
+  --gg-radius-sm: 6px;
+  --gg-radius-md: 8px;
+  --gg-radius-lg: 10px;
+  --gg-radius-xl: 12px;
+  --gg-radius-pill: 999px;
+
+  /* Shadow */
+  --gg-shadow-sm: 0 2px 6px rgba(29, 100, 177, 0.10);
+  --gg-shadow-popup: 0 4px 14px rgba(23, 43, 77, 0.10);
+
+  /* Motion */
+  --gg-motion-fast: 160ms;
+  --gg-motion-normal: 200ms;
+  --gg-motion-expand: 280ms;
+}

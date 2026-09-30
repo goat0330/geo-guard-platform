@@ -1,0 +1,18 @@
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" class="design-iconfont">
+  <rect width="16" height="16" rx="4" fill="url(#hfr12g0ck__paint0_linear_299_3782)"/>
+  <g clip-path="url(#hfr12g0ck__clip0_299_3782)" fill="#fff">
+    <path d="M8.625 11.125H7.375V3.625C7.375 3.25 7.625 3 8 3C8.375 3 8.625 3.25 8.625 3.625V11.125Z"/>
+    <path d="M12.375 13H3.625C3.25 13 3 12.75 3 12.375C3 12 3.25 11.75 3.625 11.75H12.375C12.75 11.75 13 12 13 12.375C13 12.75 12.75 13 12.375 13Z"/>
+    <path d="M6.125 11.125H4.875V5.5C4.875 5.125 5.125 4.875 5.5 4.875C5.875 4.875 6.125 5.125 6.125 5.5V11.125Z"/>
+    <path d="M11.125 11.125H9.875V6.75C9.875 6.375 10.125 6.125 10.5 6.125C10.875 6.125 11.125 6.375 11.125 6.75V11.125Z"/>
+  </g>
+  <defs>
+    <linearGradient id="hfr12g0ck__paint0_linear_299_3782" x1="1.5" y1="1" x2="14.5" y2="15" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3561FA"/>
+      <stop offset="1" stop-color="#5CDCFF"/>
+    </linearGradient>
+    <clipPath id="hfr12g0ck__clip0_299_3782">
+      <path fill="#fff" transform="translate(3 3)" d="M0 0H10V10H0z"/>
+    </clipPath>
+  </defs>
+</svg>

@@ -1,0 +1,11 @@
+allowBuilds:
+  core-js: true
+  esbuild: true
+  vue-demi: true
+  protobufjs: true
+
+onlyBuiltDependencies:
+  - core-js
+  - esbuild
+  - protobufjs
+  - vue-demi

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- @author kongweiguang -->
+<!DOCTYPE mapper
+    PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.edu.pku.whai.geological.disaster.service.mapper.DzReportDisasterMapper">
+
+    <resultMap id="DzReportDisasterVoResult"
+               type="cn.edu.pku.whai.geological.disaster.service.domain.vo.DzReportDisasterVo"
+               autoMapping="true">
+        <id property="id" column="id"/>
+        <result property="aiVisionProps"
+                column="ai_vision_props"
+                javaType="java.util.Map"
+                jdbcType="OTHER"
+                typeHandler="cn.edu.pku.whai.geological.disaster.data.typehandler.PgJacksonTypeHandler"/>
+    </resultMap>
+
+    <resultMap id="DzReportDisasterResult"
+               type="cn.edu.pku.whai.geological.disaster.service.domain.po.DzReportDisaster"
+               autoMapping="true">
+        <id property="id" column="id"/>
+        <result property="aiVisionProps"
+                column="ai_vision_props"
+                javaType="java.util.Map"
+                jdbcType="OTHER"
+                typeHandler="cn.edu.pku.whai.geological.disaster.data.typehandler.PgJacksonTypeHandler"/>
+    </resultMap>
+
+    <select id="selectListPage"
+            resultMap="DzReportDisasterVoResult">
+        select id,
+               user_id,
+               user_name,
+               user_phone,
+               user_role,
+               check_time,
+               check_center,
+               check_center_location,
+               detailed_address,
+               photos,
+               scene_text_record,
+               ai_risk_level,
+               ai_risk_label,
+               ai_report_detail,
+               ai_vision_props,
+               manual_risk_level,
+               manual_risk_remark,
+               status,
+               source_type,
+               process_type,
+               task_id,
+               create_date,
+               update_date
+        from dz_report_disaster
+            ${ew.getCustomSqlSegment}
+    </select>
+
+</mapper>

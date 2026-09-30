@@ -1,0 +1,9 @@
+{
+  "name": "geo-rag-studio-web",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {"dev":"vite --host 127.0.0.1 --port 5175","build":"vite build","preview":"vite preview"},
+  "dependencies": {"@vitejs/plugin-vue":"^5.2.1","vite":"^6.1.0","vue":"^3.5.13"},
+  "devDependencies": {}
+}

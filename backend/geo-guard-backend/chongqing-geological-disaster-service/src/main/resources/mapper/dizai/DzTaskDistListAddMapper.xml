@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- @author kongweiguang -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.edu.pku.whai.geological.disaster.service.mapper.DzTaskDistListAddMapper">
+
+    <sql id="BaseVoColumns">
+        t.task_id AS taskId,
+        t.user_id AS userId,
+        t.remark,
+        t.create_date AS createDate,
+        t.reporter_id AS reportUserId,
+        s.nick_name AS reportUserName
+    </sql>
+
+    <sql id="QueryWhere">
+        <where>
+            <if test="bo != null and bo.taskId != null">
+                AND t.task_id = #{bo.taskId}
+            </if>
+            <if test="bo != null and bo.userId != null">
+                AND t.user_id = #{bo.userId}
+            </if>
+            <if test="bo != null and bo.remark != null and bo.remark != ''">
+                AND t.remark = #{bo.remark}
+            </if>
+        </where>
+    </sql>
+
+    <select id="selectVoByKeys" resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.DzTaskDistListAddVo">
+        SELECT
+        <include refid="BaseVoColumns"/>
+        FROM dz_task_dist_list_add t
+        LEFT JOIN sys_user s ON s.user_id = t.reporter_id
+        WHERE t.task_id = #{taskId}
+        AND t.user_id = #{userId}
+    </select>
+
+    <select id="selectVoPage" resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.DzTaskDistListAddVo">
+        SELECT
+        <include refid="BaseVoColumns"/>
+        FROM dz_task_dist_list_add t
+        LEFT JOIN sys_user s ON s.user_id = t.reporter_id
+        <include refid="QueryWhere"/>
+        ORDER BY t.task_id ASC, t.user_id ASC
+    </select>
+
+    <select id="selectVoList" resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.DzTaskDistListAddVo">
+        SELECT
+        <include refid="BaseVoColumns"/>
+        FROM dz_task_dist_list_add t
+        LEFT JOIN sys_user s ON s.user_id = t.reporter_id
+        <include refid="QueryWhere"/>
+        ORDER BY t.task_id ASC, t.user_id ASC
+    </select>
+
+    <select id="selectVoListByTaskIdsAndUserId"
+            resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.DzTaskDistListAddVo">
+        SELECT
+        <include refid="BaseVoColumns"/>
+        FROM dz_task_dist_list_add t
+        LEFT JOIN sys_user s ON s.user_id = t.reporter_id
+        WHERE t.user_id = #{userId}
+        AND t.task_id IN
+        <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">
+            #{taskId}
+        </foreach>
+        ORDER BY t.create_date DESC
+    </select>
+
+    <select id="selectLatestByTaskIds"
+            resultType="cn.edu.pku.whai.geological.disaster.service.domain.vo.DzTaskDistListAddVo">
+        SELECT DISTINCT ON (t.task_id)
+        <include refid="BaseVoColumns"/>
+        FROM dz_task_dist_list_add t
+        LEFT JOIN sys_user s ON s.user_id = t.reporter_id
+        WHERE t.task_id IN
+        <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">
+            #{taskId}
+        </foreach>
+        ORDER BY t.task_id, t.create_date DESC, t.user_id DESC
+    </select>
+
+    <insert id="insertEntity">
+        INSERT INTO dz_task_dist_list_add (task_id,
+                                           user_id,
+                                           remark,
+                                           reporter_id)
+        VALUES (#{entity.taskId},
+                #{entity.userId},
+                #{entity.remark},
+                #{entity.reportUserId})
+    </insert>
+
+    <update id="updateByKeys">
+        UPDATE dz_task_dist_list_add
+        <set>
+            remark = #{entity.remark},
+            reporter_id = #{entity.reportUserId}
+        </set>
+        WHERE task_id = #{entity.taskId}
+        AND user_id = #{entity.userId}
+    </update>
+
+    <delete id="deleteByKeys">
+        DELETE
+        FROM dz_task_dist_list_add
+        WHERE task_id = #{taskId}
+          AND user_id = #{userId}
+    </delete>
+
+</mapper>

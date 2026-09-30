@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- @author kongweiguang -->
+<!DOCTYPE mapper
+    PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.edu.pku.whai.geological.disaster.data.mapper.DataGeologicalFaultMapper">
+
+    <select id="selectNearestByPoint"
+            resultType="cn.edu.pku.whai.geological.disaster.data.domain.vo.DataGeologicalFaultVo">
+        SELECT
+            id, wkt, name, strike, length, width, feature, property,
+            dip_direction, dip_angle, geom,
+            ST_Distance(
+                geom::geography,
+                ST_SetSRID(ST_MakePoint(#{lon}::double precision, #{lat}::double precision), 4326)::geography
+            ) AS distance,
+            ST_Azimuth(
+                ST_ClosestPoint(geom, ST_SetSRID(ST_MakePoint(#{lon}::double precision, #{lat}::double precision), 4326)),
+                ST_SetSRID(ST_MakePoint(#{lon}::double precision, #{lat}::double precision), 4326)
+            ) AS azimuth
+        FROM data_geological_fault
+        WHERE geom IS NOT NULL
+        ORDER BY geom &lt;-&gt; ST_SetSRID(ST_MakePoint(#{lon}::double precision, #{lat}::double precision), 4326)
+        LIMIT 1
+    </select>
+
+</mapper>

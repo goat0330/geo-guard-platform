@@ -1,0 +1,78 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### IntelliJ IDEA ###
+.idea/modules.xml
+.idea/jarRepositories.xml
+.idea/compiler.xml
+.idea/libraries/
+*.iws
+*.iml
+*.ipr
+.idea
+
+### Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+
+### Mac OS ###
+.DS_Store
+
+logs
+/.codex/**
+/.agents/**
+/.claude/**
+/docs/superpowers/*
+/docs/config/**
+**/.flattened-pom.xml
+/AGENTS.md
+/error.log
+/chongqing-geological-disaster-start/src/test/**
+CLAUDE.md
+openspec
+
+# 本地 MCP 配置（可能含数据库密码等敏感信息）
+/.mcp.json
+/.comet/config.yaml
+/node_modules/**
+/package.json
+/package-lock.json
+/skills-lock.json
+/.codegraph/.gitignore
+
+/.github
+/.codegraph
+/CLAUDE.md
+
+# BEGIN UPDENG
+# @author kongweiguang
+/.agents/
+/.claude/
+/.codex/
+/.updeng/
+/AGENTS.md
+/CLAUDE.md
+.env
+.env.*
+!.env.example
+# END UPDENG

@@ -1,0 +1,377 @@
+.files-panel {
+  padding: 16px 20px 24px;
+}
+
+.hidden-input {
+  display: none;
+}
+
+.file-toolbar,
+.toolbar-right,
+.file-stats,
+.table-tools,
+.resource-name,
+.row-actions,
+.quality-strip,
+.preview-heading {
+  display: flex;
+  align-items: center;
+}
+
+.file-toolbar {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.toolbar-right {
+  gap: 8px;
+}
+
+.file-search {
+  width: 210px;
+}
+
+.mindmap-select {
+  width: 200px;
+}
+
+.file-stats {
+  min-height: 50px;
+  gap: 18px;
+  margin-top: 14px;
+  padding: 8px 12px;
+  border: 1px solid #e9edf2;
+  border-radius: 8px;
+  color: var(--gg-text-secondary, #617185);
+  font-size: 12px;
+
+  b {
+    color: var(--gg-text-strong, #383c41);
+    font-weight: 600;
+  }
+}
+
+.quality-note {
+  margin-left: auto;
+  color: var(--gg-text-muted, #9096a2);
+}
+
+.table-tools {
+  justify-content: space-between;
+  min-height: 48px;
+  padding: 0 2px;
+}
+
+.table-tools :deep(.el-breadcrumb__inner) {
+  color: var(--gg-text-strong, #383c41);
+  font-size: 14px;
+}
+
+.table-tools button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.upload-progress {
+  color: var(--gg-primary-500, #007bff);
+  font-size: 12px;
+}
+
+.table-wrap {
+  position: relative;
+  min-height: 250px;
+}
+
+.drop-mask {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border: 2px dashed #51a4e9;
+  border-radius: 8px;
+  background: rgba(239, 246, 255, 0.92);
+  color: #007bff;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.resource-name {
+  min-width: 0;
+  gap: 9px;
+  color: var(--gg-text-primary, #222527);
+  font-size: 14px;
+}
+
+.folder-name {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--gg-primary-500, #007bff);
+  cursor: pointer;
+}
+
+.row-count,
+.muted {
+  color: var(--gg-text-muted, #9096a2);
+  font-size: 12px;
+}
+
+.file-extension {
+  display: grid;
+  width: 34px;
+  height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid #e4eaf1;
+  border-radius: 5px;
+  background: #f7f9fc;
+  color: #617185;
+  font-size: 10px;
+  font-weight: 700;
+
+  &.ext-PDF {
+    border-color: #f3cecb;
+    background: #fff7f6;
+    color: #dd4739;
+  }
+
+  &.ext-TXT,
+  &.ext-MD {
+    border-color: #cfebdc;
+    background: #f3fbf6;
+    color: #268567;
+  }
+}
+
+.filename {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-actions {
+  gap: 4px;
+}
+
+.quality-strip {
+  gap: 16px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid #e6edf3;
+  border-radius: 8px;
+  background: #fafcff;
+  color: var(--gg-text-secondary, #617185);
+  font-size: 12px;
+
+  b {
+    color: var(--gg-text-strong, #383c41);
+  }
+
+  &.compact {
+    margin: 0 0 10px;
+    flex-wrap: wrap;
+  }
+}
+
+.readonly-state,
+.pdf-empty,
+.mindmap-empty {
+  display: flex;
+  min-height: 340px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--gg-text-secondary, #617185);
+  text-align: center;
+
+  .el-icon {
+    margin-bottom: 14px;
+    color: #1685a5;
+    font-size: 34px;
+  }
+
+  strong {
+    color: var(--gg-text-primary, #222527);
+    font-size: 16px;
+  }
+
+  p {
+    max-width: 440px;
+    font-size: 14px;
+    line-height: 21px;
+  }
+}
+
+.chunk-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(350px, 0.9fr);
+  gap: 16px;
+}
+
+.chunk-column {
+  min-width: 0;
+}
+
+.chunk-card {
+  display: block;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 12px;
+  border: 1px solid #e7ecf2;
+  border-radius: 8px;
+  background: #ffffff;
+  text-align: left;
+  cursor: pointer;
+
+  &.selected {
+    border-color: #83bdf4;
+    background: #f5faff;
+  }
+
+  > div {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--gg-text-muted, #9096a2);
+    font-size: 12px;
+  }
+
+  b {
+    color: var(--gg-primary-500, #007bff);
+  }
+
+  p {
+    margin: 10px 0 0;
+    color: var(--gg-text-strong, #383c41);
+    font-size: 14px;
+    line-height: 20px;
+    white-space: pre-wrap;
+  }
+}
+
+.pdf-preview {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e5ebf2;
+  border-radius: 8px;
+  background: #f7f9fc;
+}
+
+.preview-heading {
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-size: 14px;
+
+  span {
+    color: var(--gg-text-secondary, #617185);
+    font-size: 12px;
+  }
+}
+
+.pdf-frame {
+  position: relative;
+  max-height: 62vh;
+  overflow: auto;
+  background: #ffffff;
+
+  img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+}
+
+.bbox-highlight {
+  position: absolute;
+  border: 2px solid #e23030;
+  background: rgba(226, 48, 48, 0.08);
+  pointer-events: none;
+}
+
+.pdf-preview p {
+  margin: 8px 0 0;
+  color: var(--gg-text-muted, #9096a2);
+  font-size: 12px;
+}
+
+.mindmap-canvas {
+  min-height: 280px;
+  padding: 16px;
+  border-radius: 8px;
+  background: #f8fbfe;
+
+  p {
+    margin: 18px 0 0;
+    color: var(--gg-text-muted, #9096a2);
+    font-size: 12px;
+  }
+}
+
+.mind-root {
+  display: inline-block;
+  padding: 10px 14px;
+  border: 1px solid #a8cffb;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #007bff;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.mind-page {
+  margin: 14px 0 0 30px;
+  padding-left: 14px;
+  border-left: 2px solid #b6d4f1;
+
+  strong {
+    color: var(--gg-text-strong, #383c41);
+    font-size: 14px;
+  }
+
+  ul {
+    margin: 8px 0 0;
+    padding: 0 0 0 18px;
+    border-left: 1px dashed #ccd8e4;
+  }
+
+  li {
+    margin: 6px 0;
+    color: #8fa0b1;
+  }
+
+  button {
+    max-width: 100%;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 5px;
+    background: #ffffff;
+    color: var(--gg-text-secondary, #617185);
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  button:hover {
+    color: #007bff;
+  }
+}
+
+@media (max-width: 900px) {
+  .file-toolbar,
+  .toolbar-right {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .chunk-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .pdf-preview {
+    min-height: 240px;
+  }
+}

@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- @author kongweiguang -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.edu.pku.whai.geological.disaster.data.mapper.GeologyInfoMapper">
+
+    <select id="queryEngineeringGeologyByPoint"
+            resultType="cn.edu.pku.whai.geological.disaster.data.domain.po.EngineeringGeology">
+        SELECT rock_group,
+               characteristics,
+               project_name
+        FROM data_engineering_geology
+        WHERE ST_Intersects(
+                      geom,
+                      ST_SetSRID(ST_MakePoint(#{lon}, #{lat}), 4326)
+              ) limit 1;
+    </select>
+
+    <select id="queryHydroGeologyByPoint"
+            resultType="cn.edu.pku.whai.geological.disaster.data.domain.po.HydroGeology">
+        SELECT aquifer_rock,
+               aquifer_type,
+               water_abundance,
+               rock_group_era,
+               distribution_pos,
+               burial_conditions
+        FROM data_hydro_geology
+        WHERE ST_Intersects(
+                      geom,
+                      ST_SetSRID(ST_MakePoint(#{lon}, #{lat}), 4326)
+              ) limit 1;
+    </select>
+
+    <select id="queryStratumByPoint" resultType="cn.edu.pku.whai.geological.disaster.data.domain.po.Stratum">
+        SELECT code,
+               label,
+               stratum_era,
+               stratum_system,
+               stratum_series,
+               stratum_member,
+               description,
+               stratum_group,
+               lithology
+        FROM data_stratum
+        WHERE ST_Intersects(
+                      geom,
+                      ST_SetSRID(ST_MakePoint(#{lon}, #{lat}), 4326)
+              ) limit 1;
+    </select>
+
+    <select id="queryAdRegionByPoint" resultType="cn.edu.pku.whai.geological.disaster.data.domain.vo.GeologyAdRegionVo">
+        SELECT province,
+               city,
+               county,
+               street,
+               village
+        FROM data_ad_region
+        WHERE level = 5
+          AND ST_Intersects(
+                geom,
+                ST_SetSRID(ST_MakePoint(#{lon}, #{lat}), 4326)
+          )
+        LIMIT 1;
+    </select>
+
+    <select id="queryEngineeringGeologyByBounds"
+            resultType="cn.edu.pku.whai.geological.disaster.data.domain.po.EngineeringGeology">
+        SELECT rock_group,
+        characteristics,
+        project_name
+        <!--,ST_Intersection(geom, ST_GeomFromText(#{wkt}, 4326)) AS intersect_geom -->
+        FROM data_engineering_geology
+        WHERE ST_Intersects(
+        geom,
+        ST_GeomFromText(#{wkt}, 4326)
+        );
+    </select>
+
+    <select id="queryHydroGeologyByBounds"
+            resultType="cn.edu.pku.whai.geological.disaster.data.domain.po.HydroGeology">
+        SELECT aquifer_rock,
+        aquifer_type,
+        water_abundance,
+        rock_group_era,
+        distribution_pos,
+        burial_conditions
+        <!--,ST_Intersection(geom, ST_GeomFromText(#{wkt}, 4326)) AS intersect_geom -->
+        FROM data_hydro_geology
+        WHERE ST_Intersects(
+        geom,
+        ST_GeomFromText(#{wkt}, 4326)
+        );
+    </select>
+
+    <select id="queryStratumByBounds" resultType="cn.edu.pku.whai.geological.disaster.data.domain.po.Stratum">
+        SELECT code,
+        label,
+        stratum_era,
+        stratum_system,
+        stratum_series,
+        stratum_member,
+        description,
+        stratum_group,
+        lithology
+        <!--,ST_Intersection(geom, ST_GeomFromText(#{wkt}, 4326)) AS intersect_geom -->
+        FROM data_stratum
+        WHERE ST_Intersects(
+        geom,
+        ST_GeomFromText(#{wkt}, 4326)
+        );
+    </select>
+
+    <select id="queryEngineeringGeologyByRegions"
+            resultType="cn.edu.pku.whai.geological.disaster.data.domain.po.EngineeringGeology">
+        WITH region AS (SELECT
+        ST_Union(geom) AS geom
+        FROM data_ad_region
+        WHERE name IN
+        <foreach collection="regionList"
+                 item="name"
+                 open="("
+                 close=")"
+                 separator=",">
+            #{name}
+        </foreach>)
+        SELECT
+        rock_group,
+        characteristics,
+        project_name
+        FROM (
+            SELECT
+                rock_group,
+                characteristics,
+                project_name,
+            <!--,ST_Intersection(d.geom, region.geom) AS intersect_geom -->
+                ROW_NUMBER() OVER (PARTITION BY rock_group ORDER BY (SELECT NULL)) AS rn
+            FROM data_engineering_geology d, region
+            WHERE ST_Intersects(
+                d.geom,
+                region.geom
+            )
+        ) t
+        WHERE rn = 1;
+    </select>
+
+    <select id="queryHydroGeologyByRegions"
+            resultType="cn.edu.pku.whai.geological.disaster.data.domain.po.HydroGeology">
+        WITH region AS (SELECT
+        ST_Union(geom) AS geom
+        FROM data_ad_region
+        WHERE name IN
+        <foreach collection="regionList"
+                 item="name"
+                 open="("
+                 close=")"
+                 separator=",">
+            #{name}
+        </foreach>)
+        SELECT
+        aquifer_rock,
+        aquifer_type,
+        water_abundance,
+        rock_group_era,
+        distribution_pos,
+        burial_conditions
+        FROM (
+            SELECT
+                aquifer_rock,
+                aquifer_type,
+                water_abundance,
+                rock_group_era,
+                distribution_pos,
+                burial_conditions,
+            <!--,ST_Intersection(d.geom, region.geom) AS intersect_geom -->
+                ROW_NUMBER() OVER (PARTITION BY aquifer_rock, aquifer_type ORDER BY (SELECT NULL)) AS rn
+            FROM data_hydro_geology d, region
+            WHERE ST_Intersects(
+                d.geom,
+                region.geom
+            )
+        ) t
+        WHERE rn = 1;
+    </select>
+
+    <select id="queryStratumByRegions" resultType="cn.edu.pku.whai.geological.disaster.data.domain.po.Stratum">
+        WITH region AS (SELECT
+        ST_Union(geom) AS geom
+        FROM data_ad_region
+        WHERE name IN
+        <foreach collection="regionList"
+                 item="name"
+                 open="("
+                 close=")"
+                 separator=",">
+            #{name}
+        </foreach>)
+        SELECT
+        code,
+        label,
+        stratum_era,
+        stratum_system,
+        stratum_series,
+        stratum_member,
+        description,
+        stratum_group,
+        lithology
+        FROM (
+            SELECT
+                code,
+                label,
+                stratum_era,
+                stratum_system,
+                stratum_series,
+                stratum_member,
+                description,
+                stratum_group,
+                lithology,
+            <!--,ST_Intersection(d.geom, region.geom) AS intersect_geom -->
+                ROW_NUMBER() OVER (PARTITION BY code ORDER BY (SELECT NULL)) AS rn
+            FROM data_stratum d, region
+            WHERE ST_Intersects(
+                d.geom,
+                region.geom
+            )
+        ) t
+        WHERE rn = 1;
+    </select>
+
+    <select id="queryRegionUnionWkt" resultType="java.lang.String">
+        SELECT ST_AsText(ST_Union(geom))
+        FROM data_ad_region
+        WHERE name IN
+        <foreach collection="regionList"
+                 item="name"
+                 open="("
+                 close=")"
+                 separator=",">
+            #{name}
+        </foreach>
+    </select>
+</mapper>

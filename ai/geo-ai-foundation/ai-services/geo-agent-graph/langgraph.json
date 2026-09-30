@@ -1,0 +1,8 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "hazard_review": "app.graph:hazard_review_graph",
+    "qa": "app.graph:qa_graph"
+  }
+}
