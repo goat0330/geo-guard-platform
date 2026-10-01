@@ -20,8 +20,10 @@ from urllib.parse import quote, unquote, urlsplit
 import httpx
 from fastapi import APIRouter, Body, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel, Field
 
 from . import db, main as rag
+from .chat import ChatProviderUnavailable, complete_chat
 from .config import settings
 from .schemas import DocumentBatchPayload, DocumentMovePayload, EmbeddingTestRequest, EvaluationRunPayload, GraphConfigPayload, KnowledgeBasePayload, KnowledgeBaseUpdatePayload, MindMapPayload, RerankerTestRequest, RetrieveRequest
 from .yuxi_port.chunk_presets import get_options
@@ -259,6 +261,45 @@ async def yuxi_knowledge_stats():
     return {**stats, "databases_count": stats["knowledge_base_count"], "files_count": stats["document_count"]}
 
 
+@router.get("/api/dashboard/stats/knowledge")
+async def yuxi_knowledge_dashboard_stats():
+    from yuxi.services.knowledge_dashboard_service import DATABASE_TYPE_MAPPING, FILE_TYPE_MAPPING
+
+    databases_by_type = {}
+    for database in db.list_knowledge_bases():
+        kb_type = (database.get("kb_type") or "unknown").lower()
+        display_type = DATABASE_TYPE_MAPPING.get(kb_type, kb_type or "未知类型")
+        databases_by_type[display_type] = databases_by_type.get(display_type, 0) + 1
+
+    file_type_distribution = {}
+    total_storage_size = 0
+    total_nodes = 0
+    documents = db.list_documents()
+    for document in documents:
+        extension = Path(document.get("file_name") or "").suffix.lower().lstrip(".")
+        display_type = FILE_TYPE_MAPPING.get(
+            extension,
+            extension.upper() + "文件" if extension and extension != "unknown" else "其他",
+        )
+        file_type_distribution[display_type] = file_type_distribution.get(display_type, 0) + 1
+        metadata = document.get("metadata") or {}
+        file_path = document.get("file_path")
+        file_size = metadata.get("file_size")
+        if file_size is None:
+            file_size = Path(file_path).stat().st_size if file_path and Path(file_path).is_file() else 0
+        total_storage_size += int(file_size)
+        total_nodes += int(document.get("chunk_count") or 0)
+
+    return {
+        "total_databases": sum(databases_by_type.values()),
+        "total_files": len(documents),
+        "total_nodes": total_nodes,
+        "total_storage_size": total_storage_size,
+        "databases_by_type": databases_by_type,
+        "file_type_distribution": file_type_distribution,
+    }
+
+
 @router.get("/api/knowledge/databases")
 async def yuxi_list_databases():
     return {"databases": [_yuxi_knowledge_base(item) for item in db.list_knowledge_bases()]}
@@ -267,6 +308,175 @@ async def yuxi_list_databases():
 @router.get("/api/knowledge/databases/accessible")
 async def yuxi_list_accessible_databases():
     return {"databases": [_yuxi_knowledge_base(item) for item in db.list_knowledge_bases()]}
+
+
+class ExternalRetrieveRequest(BaseModel):
+    query: str
+    file_name: str | None = None
+    options: dict | None = None
+
+
+class ExternalFindRequest(BaseModel):
+    patterns: list[str]
+    use_regex: bool = False
+    case_sensitive: bool = False
+    max_windows: int = Field(default=5, ge=1, le=20)
+    window_size: int = Field(default=80, ge=1, le=200)
+
+
+@router.get("/api/knowledge/databases/external")
+async def yuxi_list_external_databases():
+    return {
+        "databases": [
+            {
+                "kb_id": item["id"],
+                "name": item["name"],
+                "description": item.get("description") or "",
+                "kb_type": item["kb_type"],
+                "supports_documents": item["kb_type"] == "local",
+            }
+            for item in db.list_knowledge_bases()
+        ]
+    }
+
+
+@router.get("/api/knowledge/databases/external/{kb_id}/files")
+async def yuxi_list_external_files(
+    kb_id: str,
+    query: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    status: str = "all",
+):
+    knowledge_base = rag._knowledge_base_or_404(kb_id)
+    if knowledge_base["kb_type"] != "local":
+        raise HTTPException(status_code=400, detail=f"{knowledge_base['name']} 只支持检索，不支持文档查看")
+    normalized_query = (query or "").strip().casefold()
+    accepted_statuses = {
+        "indexed": {"indexed", "done"},
+        "error_indexing": {"error_indexing", "failed"},
+    }.get(status, None if status == "all" else {status})
+    documents = db.list_documents(kb_id)
+    files = []
+    for document in documents:
+        if normalized_query and normalized_query not in document["file_name"].casefold():
+            continue
+        if accepted_statuses is not None and document["status"] not in accepted_statuses:
+            continue
+        public_document = _yuxi_document(document)
+        files.append(
+            {
+                "kb_id": kb_id,
+                "kb_name": knowledge_base["name"],
+                "file_id": document["id"],
+                "filename": document["file_name"],
+                "file_type": public_document["file_type"],
+                "status": document["status"],
+                "created_at": document.get("created_at"),
+                "updated_at": document.get("created_at"),
+                "file_size": public_document["file_size"],
+                "is_folder": False,
+                "parent_id": document.get("folder_id"),
+            }
+        )
+    return {
+        "files": files[offset : offset + limit],
+        "total": len(files),
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + limit < len(files),
+    }
+
+
+@router.post("/api/knowledge/databases/external/{kb_id}/retrieve")
+async def yuxi_retrieve_external(kb_id: str, payload: ExternalRetrieveRequest):
+    knowledge_base = rag._knowledge_base_or_404(kb_id)
+    query = payload.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    options = payload.options or {}
+    filters = {"knowledge_base_id": kb_id}
+    if payload.file_name:
+        filters["file_name"] = payload.file_name
+    request = RetrieveRequest(
+        query=query,
+        search_mode=options.get("search_mode"),
+        top_k=options.get("top_k"),
+        final_top_k=options.get("final_top_k"),
+        recall_top_k=options.get("recall_top_k"),
+        use_reranker=options.get("use_reranker"),
+        similarity_threshold=options.get("similarity_threshold"),
+        filters=filters,
+    )
+    response = await rag.retrieve_api(request)
+    from yuxi.knowledge.base import KnowledgeBase
+
+    results = [
+        {
+            "id": evidence.chunk_id,
+            "content": evidence.text,
+            "score": evidence.fusion_score,
+            "metadata": {
+                "file_id": evidence.document_id,
+                "chunk_id": evidence.chunk_id,
+                "file_name": evidence.file_name,
+                "page": evidence.page,
+                "bbox": evidence.bbox,
+            },
+        }
+        for evidence in response.evidences
+    ]
+    return KnowledgeBase.build_search_output(kb_id, results)
+
+
+def _external_document_text(kb_id: str, file_id: str) -> str:
+    knowledge_base = rag._knowledge_base_or_404(kb_id)
+    if knowledge_base["kb_type"] != "local":
+        raise HTTPException(status_code=400, detail=f"{knowledge_base['name']} 只支持检索，不支持文档查看")
+    document = db.get_document(file_id)
+    if not document or document.get("knowledge_base_id") != kb_id:
+        raise HTTPException(status_code=404, detail=f"文件不存在: {file_id}")
+    blocks = db.get_blocks(file_id)
+    if not blocks:
+        raise HTTPException(status_code=400, detail=f"文件 {file_id} 没有解析后的 Markdown 内容")
+    return "\n\n".join(block["text"] for block in blocks)
+
+
+@router.get("/api/knowledge/databases/external/{kb_id}/files/{file_id}/open")
+async def yuxi_open_external_file(
+    kb_id: str,
+    file_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=1800),
+):
+    content = _external_document_text(kb_id, file_id)
+    from yuxi.knowledge.base import KnowledgeBase
+
+    window = KnowledgeBase._build_open_file_window(None, content, offset=offset, limit=limit)
+    return {"kb_id": kb_id, "file_id": file_id, **window}
+
+
+@router.post("/api/knowledge/databases/external/{kb_id}/files/{file_id}/find")
+async def yuxi_find_external_file(kb_id: str, file_id: str, payload: ExternalFindRequest):
+    if not payload.patterns:
+        raise HTTPException(status_code=400, detail="patterns 不能为空")
+    content = _external_document_text(kb_id, file_id)
+    from yuxi.knowledge.base import KnowledgeBase
+
+    try:
+        result = KnowledgeBase._build_find_file_windows(
+            content,
+            patterns=payload.patterns,
+            use_regex=payload.use_regex,
+            case_sensitive=payload.case_sensitive,
+            max_windows=payload.max_windows,
+            window_size=payload.window_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except re.error as exc:
+        raise HTTPException(status_code=400, detail=f"正则表达式无效: {exc}") from exc
+    return {"kb_id": kb_id, "file_id": file_id, **result}
 
 
 @router.post("/api/knowledge/databases")
@@ -406,7 +616,34 @@ async def yuxi_virtual_folder_migration_events(knowledge_base_id: str, task_id: 
 
 @router.post("/api/knowledge/generate-description")
 async def yuxi_generate_description(payload: dict = Body(...)):
-    raise HTTPException(status_code=503, detail="描述生成需要配置可用的 Chat Completion 模型；当前未生成伪造内容")
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="知识库名称不能为空")
+    file_list = payload.get("file_list") or []
+    if not isinstance(file_list, list):
+        raise HTTPException(status_code=422, detail="file_list 必须是数组")
+    files_text = "\n".join(f"- {str(item)}" for item in file_list[:50])
+    if len(file_list) > 50:
+        files_text += f"\n... (还有 {len(file_list) - 50} 个文件)"
+    current_description = str(payload.get("current_description") or "暂无描述")
+    if files_text:
+        current_description = f"{current_description}\n\n知识库包含的文件:\n{files_text}"
+    prompt = (
+        "请帮我优化以下知识库的描述。\n\n"
+        f"知识库名称: {name}\n当前描述: {current_description}\n\n"
+        "要求:\n1. 描述将作为智能体工具的描述使用\n"
+        "2. 清晰说明知识库包含什么内容、适合解答什么类型的问题\n"
+        "3. 简洁有力，通常 2-4 句话\n4. 不要使用 Markdown 格式\n"
+        f"{'5. 请参考提供的文件列表准确概括知识库内容' if files_text else ''}\n"
+        "请直接输出优化后的描述，不要有任何前缀说明。"
+    )
+    try:
+        description = await complete_chat([{"role": "user", "content": prompt}])
+    except ChatProviderUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"描述生成失败: {str(exc)[:300]}") from exc
+    return {"description": description, "status": "success"}
 
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/providers/embedding/test")
@@ -876,7 +1113,8 @@ async def yuxi_add_documents(knowledge_base_id: str, payload: dict = Body(...)):
             knowledge_base_id, folder_id,
         )
         try:
-            result = await rag.parse_existing_document(document_id)
+            parser_override = {"ocr_engine": params["ocr_engine"]} if params.get("ocr_engine") else None
+            result = await rag.parse_existing_document(document_id, parser_override)
             if params.get("auto_index"):
                 result = await rag.index_existing_document(document_id)
             processed.append({"document_id": document_id, "file_id": document_id, "result": result})
@@ -889,7 +1127,7 @@ async def yuxi_add_documents(knowledge_base_id: str, payload: dict = Body(...)):
 
 def _batch_request(payload: dict) -> DocumentBatchPayload:
     file_ids = payload.get("file_ids") or payload.get("document_ids") or []
-    return DocumentBatchPayload(document_ids=[str(item) for item in file_ids])
+    return DocumentBatchPayload(document_ids=[str(item) for item in file_ids], params=payload.get("params") or {})
 
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/documents/parse")
@@ -900,7 +1138,7 @@ async def yuxi_parse_documents(knowledge_base_id: str, payload: dict = Body(...)
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/documents/parse-pending")
 async def yuxi_parse_pending(knowledge_base_id: str, payload: dict = Body(default={} )):
-    result = await rag.parse_pending_knowledge_base_documents(knowledge_base_id)
+    result = await rag.parse_pending_knowledge_base_documents(knowledge_base_id, payload.get("params") or {})
     return {**result, "status": "success" if not result["failed"] else "partial", "message": f"解析完成 {len(result['processed'])} 个，失败 {len(result['failed'])} 个"}
 
 
@@ -988,6 +1226,12 @@ def _retrieval_options(knowledge_base: dict) -> dict:
         {"key": "bm25_drop_ratio_search", "label": "BM25 稀疏项丢弃比例", "type": "number", "default": config.get("bm25_drop_ratio_search", 0), "min": 0, "max": 1, "step": 0.01},
         {"key": "use_reranker", "label": "启用重排序", "type": "boolean", "default": config.get("use_reranker", False)},
         {"key": "use_graph_retrieval", "label": "启用图检索", "type": "boolean", "default": config.get("use_graph_retrieval", False)},
+        {"key": "graph_entity_top_k", "label": "图实体召回数量", "type": "number", "default": config.get("graph_entity_top_k", 10), "min": 1, "max": 100, "depend_on": ("use_graph_retrieval", True)},
+        {"key": "graph_triple_top_k", "label": "图三元组召回数量", "type": "number", "default": config.get("graph_triple_top_k", 10), "min": 1, "max": 100, "depend_on": ("use_graph_retrieval", True)},
+        {"key": "graph_max_nodes", "label": "图检索最大节点数", "type": "number", "default": config.get("graph_max_nodes", 10000), "min": 100, "max": 50000, "depend_on": ("use_graph_retrieval", True)},
+        {"key": "graph_top_k", "label": "图召回 Chunk 数", "type": "number", "default": config.get("graph_top_k", 20), "min": 1, "max": 200, "depend_on": ("use_graph_retrieval", True)},
+        {"key": "graph_weight", "label": "图检索融合权重", "type": "number", "default": config.get("graph_weight", 1.0), "min": 0, "max": 5, "step": 0.1, "depend_on": ("use_graph_retrieval", True)},
+        {"key": "ppr_damping", "label": "PPR 阻尼系数", "type": "number", "default": config.get("ppr_damping", 0.85), "min": 0.1, "max": 0.99, "step": 0.01, "depend_on": ("use_graph_retrieval", True)},
     ]
     return {"params": {"options": options}, **config}
 
@@ -1024,12 +1268,53 @@ async def yuxi_query(knowledge_base_id: str, payload: dict = Body(...)):
     request = _retrieve_request(knowledge_base_id, str(payload.get("query") or ""), payload.get("meta"))
     result = await rag.retrieve_api(request)
     result = result.model_dump() if hasattr(result, "model_dump") else result
-    return [
-        {"id": item["evidence_id"], "content": item["text"], "text": item["text"],
-         "score": item.get("rerank_score") or item.get("fusion_score") or item.get("bm25_score") or item.get("vector_score") or 0,
-         "metadata": {"file_id": item["document_id"], "source": item["file_name"], "chunk_id": item["chunk_id"], "page": item.get("page"), "bbox": item.get("bbox")}}
-        for item in result.get("evidences", [])
-    ]
+    search_results = []
+    for item in result.get("evidences", []):
+        scores = item.get("scores") or {}
+        metadata = dict(item.get("metadata") or {})
+        file_name = item.get("file_name") or metadata.get("source") or ""
+        metadata.update(
+            {
+                "file_id": item["document_id"],
+                "source": file_name,
+                "chunk_id": item["chunk_id"],
+                "chunk_index": metadata.get("chunk_index", item.get("chunk_index")),
+                "page": item.get("page"),
+                "bbox": item.get("bbox"),
+            }
+        )
+        fusion_score = item.get("fusion_score")
+        if fusion_score is None:
+            fusion_score = scores.get("fusion")
+        score = fusion_score
+        if score is None:
+            for key in ("hybrid_score", "bm25_score", "vector_score"):
+                if item.get(key) is not None:
+                    score = item[key]
+                    break
+            else:
+                score = 0.0
+        search_result = {
+            "id": item["evidence_id"],
+            "content": item["text"],
+            "text": item["text"],
+            "score": score,
+            "metadata": metadata,
+        }
+        score_fields = {
+            "bm25_score": item.get("bm25_score", scores.get("bm25")),
+            "vector_score": item.get("vector_score", scores.get("vector")),
+            "hybrid_score": item.get("hybrid_score", scores.get("hybrid")),
+            "graph_score": item.get("graph_score", scores.get("graph")),
+            "fusion_score": fusion_score,
+            "rerank_score": item.get("rerank_score", scores.get("rerank")),
+        }
+        search_result.update({key: value for key, value in score_fields.items() if value is not None})
+        distance = item.get("distance", scores.get("distance"))
+        if request.include_distances is not False and distance is not None:
+            search_result["distance"] = distance
+        search_results.append(search_result)
+    return search_results
 
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}/sample-questions")
@@ -1040,9 +1325,45 @@ async def yuxi_get_sample_questions(knowledge_base_id: str):
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/sample-questions")
 async def yuxi_save_sample_questions(knowledge_base_id: str, payload: dict = Body(...)):
-    if not isinstance(payload.get("questions"), list):
-        raise HTTPException(status_code=503, detail="生成示例问题需要配置可用的 LLM；当前服务不会返回预设问题冒充模型结果")
-    return await rag.save_sample_questions(knowledge_base_id, payload)
+    knowledge_base = rag._knowledge_base_or_404(knowledge_base_id)
+    supplied = payload.get("questions")
+    if supplied is not None:
+        if not isinstance(supplied, list):
+            raise HTTPException(status_code=422, detail="questions 必须是数组")
+        return await rag.save_sample_questions(knowledge_base_id, payload)
+
+    count = payload.get("count", 10)
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 50:
+        raise HTTPException(status_code=422, detail="count 必须是 1 到 50 的整数")
+    documents = db.list_documents(knowledge_base_id)
+    if not documents:
+        raise HTTPException(status_code=400, detail="知识库中没有文件")
+    file_lines = "\n".join(
+        f"- {item.get('file_name') or item.get('filename') or ''} ({Path(item.get('file_name') or '').suffix.lstrip('.')})"
+        for item in documents[:20]
+    )
+    system_prompt = (
+        "你是一个专业的知识库问答测试专家。根据知识库文件列表生成有价值的检索测试问题。"
+        "问题要具体、多样，涵盖事实查询、概念解释和操作指导，长度控制在10-30字。"
+        '只返回 JSON 对象：{"questions":["问题1？"]}，不要其他说明。'
+    )
+    user_prompt = f'请为知识库"{knowledge_base["name"]}"生成{count}个测试问题。\n文件列表：\n{file_lines}'
+    try:
+        content = await complete_chat([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ])
+        content = re.sub(r"^\s*```(?:json)?|```\s*$", "", content, flags=re.IGNORECASE).strip()
+        parsed = json.loads(content)
+        questions = parsed.get("questions") if isinstance(parsed, dict) else None
+        if not isinstance(questions, list) or not questions or any(not isinstance(item, str) or not item.strip() for item in questions):
+            raise ValueError("模型响应的 questions 必须是非空字符串数组")
+    except ChatProviderUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"示例问题生成失败: {str(exc)[:300]}") from exc
+    saved = await rag.save_sample_questions(knowledge_base_id, {"questions": questions})
+    return {**saved, "count": len(questions), "kb_id": knowledge_base_id, "db_name": knowledge_base["name"]}
 
 
 @router.get("/api/knowledge/mindmap/databases")

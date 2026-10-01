@@ -97,7 +97,7 @@ def test_local_knowledge_management_views_retrieval_and_evaluation(tmp_path, mon
     assert client.get(f"/api/v1/knowledge-bases/{kb_id}/evaluation/datasets/{dataset_id}").json()["total"] == 1
 
 
-def test_notion_connector_reports_unavailable_until_token_is_set(tmp_path, monkeypatch):
+def test_notion_connector_reports_unavailable_until_data_source_is_set(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     created = client.post(
         "/api/v1/knowledge-bases",
@@ -106,7 +106,7 @@ def test_notion_connector_reports_unavailable_until_token_is_set(tmp_path, monke
     assert created.status_code == 200
     tested = client.post(f"/api/v1/knowledge-bases/{created.json()['id']}/connection-test")
     assert tested.status_code == 503
-    assert "Integration Token" in tested.json()["detail"]
+    assert "notion_data_source_id" in tested.json()["detail"]
 
 
 def test_graph_config_masks_api_key_and_requires_a_provider_before_indexing(tmp_path, monkeypatch):

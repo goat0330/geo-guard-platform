@@ -5,7 +5,8 @@ from pathlib import Path
 from . import db
 from .config import settings
 from .embedding import embed_batched, embed_texts_sync, enabled as embedding_enabled
-from .parser import parse_file, parse_pdf_layout, parse_pdf_mineru, parse_pdf_mineru_official, parse_text
+from . import milvus_store
+from .parser import parse_file, parse_text
 from .yuxi_port.chunk_presets import normalize_chunk_config, normalize_preset
 from .yuxi_port.chunking import chunk_blocks
 
@@ -35,6 +36,7 @@ async def _embed_chunks(chunks: list[dict], config: dict | None = None) -> int:
         raise ValueError("Embedding vector count does not match chunk count")
     for chunk, vector in zip(chunks, vectors, strict=True):
         db.update_embedding(chunk["id"], vector, _embedding_model(config))
+        chunk["embedding"] = vector
     return len(vectors)
 
 
@@ -76,6 +78,16 @@ async def _index_document(
         if embedding_enabled(embedding_config):
             db.update_document_status(document_id, "embedding")
         embedded = await _embed_chunks(chunks, embedding_config)
+        vector_index = None
+        if settings.rag_search_backend == "milvus":
+            if not knowledge_base_id:
+                raise ValueError("Milvus indexing requires a knowledge base")
+            vector_index = await milvus_store.upsert_document(
+                knowledge_base_id,
+                document_id,
+                db.get_chunks(document_id),
+                embedding_config,
+            )
         db.update_document_status(document_id, "indexed")
     except Exception as exc:
         db.update_document_status(document_id, "failed", str(exc))
@@ -91,6 +103,7 @@ async def _index_document(
         "embedding_model": _embedding_model(embedding_config) if embedded else None,
         "chunk_preset_id": preset,
         "chunk_parser_config": parser_config,
+        "vector_index": vector_index,
         "status": "indexed",
     }
 
@@ -109,39 +122,17 @@ async def ingest_pdf(
     normalized_preset = normalize_preset(preset)
     normalized_config = normalize_chunk_config(parser_config)
     source_path = str(Path(path).resolve())
-    parser_options = parser_adapter or {}
-    parser_engine = parser_options.get("engine", "auto")
-    mineru_uri = parser_options.get("mineru_api_uri") or None
-    use_mineru_official = parser_engine == "mineru_official" or (
-        parser_engine == "auto" and not mineru_uri and bool(settings.mineru_api_key)
-    )
-    use_mineru = parser_engine == "mineru" or (
-        parser_engine == "auto" and bool(mineru_uri or (settings.mineru_enabled and settings.mineru_api_uri))
-    )
-    parser_name = (
-        "mineru-official"
-        if use_mineru_official
-        else "mineru-file_parse"
-        if use_mineru
-        else "pymupdf-layout"
-    )
+    parser_options = {**(parser_adapter or {}), "knowledge_base_id": knowledge_base_id}
+    requested_parser = parser_options.get("ocr_engine") or parser_options.get("engine") or "auto"
+    parser_name = requested_parser
     name = file_name or Path(path).name
     document_id = db.create_document(
-        name, source_path, "application/pdf", parser_name, normalized_preset, normalized_config,
+        name, source_path, "application/pdf", requested_parser, normalized_preset, normalized_config,
         {"source_type": "pdf", **(metadata or {})}, knowledge_base_id, folder_id,
     )
     try:
         db.update_document_status(document_id, "parsing")
-        if use_mineru_official:
-            blocks = await parse_pdf_mineru_official(
-                source_path,
-                parser_options.get("api_key"),
-                mineru_uri,
-            )
-        elif use_mineru:
-            blocks = await parse_pdf_mineru(source_path, mineru_uri)
-        else:
-            blocks = parse_pdf_layout(source_path)
+        blocks, parser_name = await parse_file(source_path, parser_options)
         db.update_document_status(document_id, "parsed", parser=parser_name)
         return await _index_document(
             name,
@@ -239,27 +230,19 @@ async def ingest_text(
         raise
 
 
-async def parse_existing_document(document_id: str) -> dict:
+async def parse_existing_document(document_id: str, parser_override: dict | None = None) -> dict:
     document = db.get_document(document_id)
     if not document:
         raise ValueError("Document not found")
     knowledge_base = db.get_knowledge_base(document["knowledge_base_id"]) if document.get("knowledge_base_id") else None
     kb_config = knowledge_base.get("config", {}) if knowledge_base else {}
-    parser_config = kb_config.get("parser", {})
+    parser_config = {**(kb_config.get("parser", {}) or {}), **(parser_override or {})}
+    if parser_config.get("ocr_engine"):
+        parser_config["engine"] = parser_config.pop("ocr_engine")
     path = document.get("file_path")
     try:
         db.update_document_status(document_id, "parsing")
-        if document["mime_type"] == "application/pdf":
-            if not path or not Path(path).is_file():
-                raise ValueError("PDF 原文件不存在，无法重新解析")
-            engine = parser_config.get("engine", "auto")
-            mineru_uri = parser_config.get("mineru_api_uri") or None
-            use_mineru = engine == "mineru" or (
-                engine == "auto" and bool(mineru_uri or (settings.mineru_enabled and settings.mineru_api_uri))
-            )
-            parser_name = "mineru-file_parse" if use_mineru else "pymupdf-layout"
-            blocks = await parse_pdf_mineru(path, mineru_uri) if use_mineru else parse_pdf_layout(path)
-        elif path and Path(path).is_file():
+        if path and Path(path).is_file():
             blocks, parser_name = await parse_file(path, parser_config)
         else:
             blocks = db.get_blocks(document_id)

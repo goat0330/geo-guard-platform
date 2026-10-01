@@ -2,15 +2,21 @@
 
 from copy import deepcopy
 
+from . import _upstream  # noqa: F401
+from yuxi.knowledge.chunking.ragflow_like.presets import (
+    CHUNK_ENGINE_VERSION as YUXI_CHUNK_ENGINE_VERSION,
+    CHUNK_PRESETS as YUXI_CHUNK_PRESETS,
+    get_chunk_preset_options as get_yuxi_chunk_preset_options,
+)
+
 DEFAULT_CHUNK_PRESET_ID = "general"
-CHUNK_ENGINE_VERSION = "yuxi-ragflow-like-v1+source-map-v1"
+CHUNK_ENGINE_VERSION = f"{YUXI_CHUNK_ENGINE_VERSION}+source-map-v1"
 CHUNK_PRESETS = {
-    "general": {"label": "General", "description": "通用分块：按段落和长度组织文本。"},
-    "qa": {"label": "QA", "description": "问答分块：将问题与回答尽量保留在同一块。"},
-    "book": {"label": "Book", "description": "手册分块：保留章节标题与后续内容。"},
-    "laws": {"label": "Laws", "description": "法规分块：按章、节、条组织规范文本。"},
-    "semantic": {"label": "Semantic", "description": "实验：当前为段落分块 fallback，不执行语义聚类。"},
-    "separator": {"label": "Separator", "description": "按指定分隔符切分，超长片段再按 token 目标拆分。"},
+    preset_id: {
+        "label": preset["label"],
+        "description": preset["description"],
+    }
+    for preset_id, preset in YUXI_CHUNK_PRESETS.items()
 }
 
 
@@ -67,6 +73,6 @@ def normalize_chunk_config(config: dict | None) -> dict:
 
 def get_options() -> list[dict]:
     return [
-        {"value": key, **value, "experimental": key == "semantic"}
-        for key, value in CHUNK_PRESETS.items()
+        {**option, "experimental": option["value"] == "semantic"}
+        for option in get_yuxi_chunk_preset_options()
     ]

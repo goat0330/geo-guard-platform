@@ -4,13 +4,16 @@
 
 ## 启动
 
-在 PowerShell 中：
+在 PowerShell 中，先从 GitHub Releases 下载完整离线构建包，再由根目录构建脚本自动解压并构建：
 
 ```powershell
-cd backend/geo-guard-backend/local-auth-service
-.\build-local.ps1
+cd backend/geo-guard-backend
+.\build-offline.ps1 -KitArchive D:\path\to\geo-guard-offline-build-kit.zip
+cd local-auth-service
 .\run-local.ps1
 ```
+
+以后重建本地认证服务时运行 `.\build-local.ps1`。构建和运行都使用离线包内的 JDK、Maven 和依赖缓存；Maven 强制离线模式。
 
 `run-local.ps1` 会在当前终端安全提示本地账号和密码。密码只作为当前服务进程的环境变量使用；服务不保存账号或密码。验证码通过 JDK 生成 GIF 图片，5 分钟过期且一次性使用。会话令牌保存在内存中，服务重启后失效。
 

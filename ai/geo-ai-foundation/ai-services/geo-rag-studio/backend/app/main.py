@@ -22,9 +22,14 @@ from .config import settings
 from .embedding import embed_texts, enabled as embedding_enabled, value as embedding_value
 from .parser import parse_pdf_layout, parse_pdf_mineru, parse_pdf_mineru_official, render_pdf_page
 from .pipeline import index_existing_document, ingest_file, ingest_pdf, ingest_text, parse_existing_document
-from .knowledge_features import build_entity_graph, generate_mindmap, indexed_content_fingerprint
+from .knowledge_features import build_entity_graph, generate_mindmap, index_knowledge_graph_vectors, indexed_content_fingerprint
 from .retrieval import ProviderUnavailable, retrieve, retrieve_debug
 from .yuxi_port.rerank import enabled as reranker_enabled, rerank
+from .yuxi_port import _upstream  # noqa: F401
+from yuxi.knowledge.implementations.dify import DifyKB
+from yuxi.knowledge.implementations.notion import NOTION_API_BASE, NotionAPIError, NotionKB
+from yuxi.knowledge.read_models import KnowledgeBaseConfig
+from .yuxi_port.evaluation import calculate_retrieval_metrics
 from .schemas import (
     EmbeddingTestRequest,
     EvaluationRequest,
@@ -68,6 +73,8 @@ MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 def _provider_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ProviderUnavailable):
         return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, NotionAPIError):
+        return HTTPException(status_code=502, detail="Notion API 请求失败")
     if isinstance(exc, httpx.HTTPError):
         return HTTPException(status_code=502, detail=f"外部解析或模型服务请求失败：{type(exc).__name__}")
     if isinstance(exc, ValueError):
@@ -139,6 +146,22 @@ def _merge_config(current: dict, incoming: dict) -> dict:
             raise ValueError(f"{name} 必须在 0-1 之间")
         retrieval[name] = value
     retrieval["use_graph_retrieval"] = bool(retrieval.get("use_graph_retrieval", False))
+    for name, minimum, maximum, default in (
+        ("graph_entity_top_k", 1, 100, 10),
+        ("graph_triple_top_k", 1, 100, 10),
+        ("graph_max_nodes", 100, 50000, 10000),
+        ("graph_top_k", 1, 200, 20),
+    ):
+        value = int(retrieval.get(name, default))
+        if not minimum <= value <= maximum:
+            raise ValueError(f"{name} 必须在 {minimum}-{maximum} 之间")
+        retrieval[name] = value
+    retrieval["graph_weight"] = float(retrieval.get("graph_weight", 1.0))
+    if not 0 <= retrieval["graph_weight"] <= 5:
+        raise ValueError("graph_weight 必须在 0-5 之间")
+    retrieval["ppr_damping"] = float(retrieval.get("ppr_damping", 0.85))
+    if not 0.1 <= retrieval["ppr_damping"] <= 0.99:
+        raise ValueError("ppr_damping 必须在 0.1-0.99 之间")
     graph = merged.get("graph", {})
     graph["max_keywords_per_document"] = int(graph.get("max_keywords_per_document", 12))
     if not 1 <= graph["max_keywords_per_document"] <= 50:
@@ -169,7 +192,10 @@ def _validate_model_config(config: dict) -> None:
     if config.get("reranker", {}).get("protocol", "openai") not in {"openai", "dashscope"}:
         raise ValueError("不支持的 Reranker 协议")
     parser = config.get("parser", {})
-    if parser.get("engine", "auto") not in {"auto", "pymupdf-layout", "mineru"}:
+    from .yuxi_port import _upstream  # noqa: F401
+    from yuxi.knowledge.parser.capabilities import PARSER_CAPABILITIES
+
+    if parser.get("engine", "auto") not in {"auto", "pymupdf-layout", "mineru", "mineru_ocr", "mineru_official", "disable", *PARSER_CAPABILITIES}:
         raise ValueError("不支持的 PDF 解析器")
     mineru_url = str(parser.get("mineru_api_uri") or "").strip()
     if mineru_url and urlparse(mineru_url).scheme not in {"http", "https"}:
@@ -546,7 +572,7 @@ async def batch_delete_knowledge_base_documents(knowledge_base_id: str, request:
     return {"deleted": deleted, "not_found": missing}
 
 
-async def _process_document_batch(knowledge_base_id: str, document_ids: list[str], operation: str):
+async def _process_document_batch(knowledge_base_id: str, document_ids: list[str], operation: str, params: dict | None = None):
     _knowledge_base_or_404(knowledge_base_id)
     processed = []
     failures = []
@@ -556,7 +582,7 @@ async def _process_document_batch(knowledge_base_id: str, document_ids: list[str
             failures.append({"document_id": document_id, "error_message": "Document not found"})
             continue
         try:
-            result = await (parse_existing_document(document_id) if operation == "parse" else index_existing_document(document_id))
+            result = await (parse_existing_document(document_id, params) if operation == "parse" else index_existing_document(document_id))
             processed.append(result)
         except Exception as exc:
             failures.append({"document_id": document_id, "error_message": str(exc)[:500]})
@@ -565,13 +591,13 @@ async def _process_document_batch(knowledge_base_id: str, document_ids: list[str
 
 @app.post("/api/v1/knowledge-bases/{knowledge_base_id}/documents/parse")
 async def parse_knowledge_base_documents(knowledge_base_id: str, request: DocumentBatchPayload):
-    return await _process_document_batch(knowledge_base_id, request.document_ids, "parse")
+    return await _process_document_batch(knowledge_base_id, request.document_ids, "parse", request.params)
 
 
 @app.post("/api/v1/knowledge-bases/{knowledge_base_id}/documents/parse-pending")
-async def parse_pending_knowledge_base_documents(knowledge_base_id: str):
+async def parse_pending_knowledge_base_documents(knowledge_base_id: str, params: dict | None = None):
     items = [doc["id"] for doc in db.list_documents(knowledge_base_id) if doc["status"] in {"uploaded", "failed"}]
-    return await _process_document_batch(knowledge_base_id, items, "parse")
+    return await _process_document_batch(knowledge_base_id, items, "parse", params)
 
 
 @app.post("/api/v1/knowledge-bases/{knowledge_base_id}/documents/index")
@@ -773,8 +799,15 @@ async def knowledge_graph_status(knowledge_base_id: str):
     )
     pending_count = total_chunks if outdated else failed_count
     entity_count = sum(1 for node in graph.get("nodes", []) if node.get("type") != "Chunk")
+    vector_index = graph.get("vector_index") or {"status": "not_built", "record_count": 0}
+    vector_expected_count = entity_count + sum(1 for edge in graph.get("edges", []) if edge.get("type") != "MENTIONS")
+    vector_completed_count = vector_index.get("record_count", 0) if vector_index.get("status") == "indexed" else 0
+    vector_failed_count = vector_expected_count if vector_index.get("status") == "error" else 0
+    overall_status = "outdated" if outdated else graph.get("status", "indexed")
+    if overall_status == "indexed" and vector_index.get("status") != "indexed":
+        overall_status = "partial"
     return {
-        "status": "outdated" if outdated else graph.get("status", "indexed"),
+        "status": overall_status,
         "locked": bool(config and config.get("locked")), "config": config,
         "node_count": len(graph["nodes"]), "edge_count": len(graph["edges"]),
         "source_document_count": len(graph["source_document_ids"]),
@@ -782,11 +815,18 @@ async def knowledge_graph_status(knowledge_base_id: str):
         "indexed_chunks": completed_count if not outdated else 0,
         "structured_chunks": completed_count if not outdated else 0,
         "entity_count": entity_count, "relationship_count": len(graph.get("edges", [])),
-        "build_task_progress": 100 if not outdated and graph.get("status") == "indexed" else 0,
+        "build_task_progress": 100 if not outdated and overall_status == "indexed" else 0,
         "extraction_counts": {"completed": completed_count if not outdated else 0,
                               "failed": failed_count if not outdated else 0,
                               "pending": pending_count, "processing": 0},
-        "vector_counts": {"supported": False, "completed": 0, "failed": 0, "pending": 0, "processing": 0},
+        "vector_counts": {
+            "supported": True,
+            "completed": vector_completed_count,
+            "failed": vector_failed_count,
+            "pending": max(0, vector_expected_count - vector_completed_count - vector_failed_count),
+            "processing": 0,
+        },
+        "vector_index": vector_index,
         "created_at": saved["created_at"], "generation": graph["generation"],
     }
 
@@ -845,13 +885,19 @@ async def build_knowledge_graph_index(knowledge_base_id: str):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    graph["vector_index"] = await index_knowledge_graph_vectors(knowledge_base, graph)
     saved = db.save_knowledge_view(knowledge_base_id, "graph", "", graph)
     if graph["status"] == "failed" and not graph["nodes"]:
         raise HTTPException(status_code=502, detail=f"图谱抽取失败：{len(graph['failed_chunks'])} 个 Chunk 均未成功")
-    return {"status": graph["status"], "node_count": len(graph["nodes"]), "edge_count": len(graph["edges"]),
+    overall_status = graph["status"]
+    if overall_status == "indexed" and graph["vector_index"].get("status") != "indexed":
+        overall_status = "partial"
+    return {"status": overall_status, "structure_status": graph["status"],
+            "node_count": len(graph["nodes"]), "edge_count": len(graph["edges"]),
             "source_document_count": len(graph["source_document_ids"]), "created_at": saved["created_at"],
             "generation": graph["generation"], "failed_chunk_count": len(graph["failed_chunks"]),
-            "processed_chunk_count": graph["processed_chunk_count"]}
+            "processed_chunk_count": graph["processed_chunk_count"],
+            "vector_index": graph["vector_index"]}
 
 
 @app.post("/api/v1/knowledge-bases/{knowledge_base_id}/graph-build/reset")
@@ -973,54 +1019,55 @@ async def delete_knowledge_base_evaluation_run(knowledge_base_id: str, run_id: s
 
 
 async def _dify_retrieve(request: RetrieveRequest, knowledge_base: dict) -> RetrieveResponse:
-    dify = knowledge_base.get("config", {}).get("dify", {})
-    api_url = str(dify.get("dify_api_url") or "").rstrip("/")
-    token = str(dify.get("dify_token") or "")
-    dataset_id = str(dify.get("dify_dataset_id") or "")
-    if not api_url or not token or not dataset_id:
-        raise ProviderUnavailable("Dify 连接未完成：需要 API URL、Token 和 Dataset ID")
-    retrieval_config = knowledge_base.get("config", {}).get("retrieval", {})
+    config = knowledge_base.get("config", {})
+    dify = config.get("dify", {})
+    try:
+        additional_params = DifyKB.validate_additional_params(dify)
+    except ValueError as exc:
+        raise ProviderUnavailable(f"Dify 连接未完成：{exc}") from exc
+
+    retrieval_config = config.get("retrieval", {})
     search_mode = request.search_mode or retrieval_config.get("search_mode", "hybrid")
-    search_methods = {"vector": "semantic_search", "keyword": "keyword_search", "hybrid": "hybrid_search"}
     final_top_k = request.final_top_k or request.top_k or retrieval_config.get("final_top_k", 8)
-    payload = {
-        "query": request.query.strip(),
-        "retrieval_model": {
-            "search_method": search_methods[search_mode],
-            "top_k": final_top_k,
-            "reranking_enable": False,
-            "score_threshold_enabled": False,
+    query_config = KnowledgeBaseConfig(
+        kb_id=str(knowledge_base["id"]),
+        kb_type="dify",
+        query_params={
+            "options": {
+                "search_mode": search_mode,
+                "final_top_k": final_top_k,
+                "score_threshold_enabled": bool(retrieval_config.get("score_threshold_enabled", False)),
+                "similarity_threshold": request.similarity_threshold
+                if request.similarity_threshold is not None
+                else retrieval_config.get("similarity_threshold", 0.0),
+            }
         },
-    }
-    headers = {"Authorization": f"Bearer {token}"}
-    url = f"{api_url}/datasets/{dataset_id}/retrieve"
+        additional_params=additional_params,
+    )
     started = time.perf_counter()
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(url, headers=headers, json=payload)
-        if response.is_error:
-            response.raise_for_status()
-        data = response.json()
-    records = data.get("records", []) if isinstance(data, dict) else []
-    if not isinstance(records, list):
-        raise ValueError("Dify 返回的 records 格式无效")
+    results = await DifyKB(str(settings.rag_upload_dir)).aquery(
+        request.query.strip(),
+        str(knowledge_base["id"]),
+        config=query_config,
+    )
+    dataset_id = additional_params["dify_dataset_id"]
     evidences = []
-    for index, record in enumerate(records[:final_top_k], start=1):
-        if not isinstance(record, dict):
+    for index, result in enumerate(results[:final_top_k], start=1):
+        if not isinstance(result, dict):
             continue
-        segment = record.get("segment") or {}
-        document = segment.get("document") or {}
-        text = segment.get("content")
+        metadata = result.get("metadata") or {}
+        text = result.get("content")
         if not isinstance(text, str) or not text.strip():
             continue
-        score = float(record.get("score") or 0.0)
-        segment_id = str(segment.get("id") or index)
-        document_id = str(document.get("id") or dataset_id)
+        score = float(result.get("score") or 0.0)
+        segment_id = str(metadata.get("chunk_id") or index)
+        document_id = str(metadata.get("file_id") or dataset_id)
         evidences.append(
             Evidence(
-                evidence_id=f"DIFY-{dataset_id}-{segment_id}",
+                evidence_id=f"DIFY-{knowledge_base['id']}-{segment_id}",
                 document_id=document_id,
                 chunk_id=segment_id,
-                file_name=str(document.get("name") or "Dify Dataset"),
+                file_name=str(metadata.get("source") or "Dify Dataset"),
                 page=None,
                 text=text,
                 token_count=count_tokens(text),
@@ -1040,7 +1087,7 @@ async def _dify_retrieve(request: RetrieveRequest, knowledge_base: dict) -> Retr
         retrieval={
             "mode": "dify-read-only",
             "search_mode": search_mode,
-            "candidate_count": len(records),
+            "candidate_count": len(results),
             "recall_top_k": request.recall_top_k or final_top_k,
             "final_top_k": final_top_k,
             "use_reranker": False,
@@ -1052,94 +1099,71 @@ async def _dify_retrieve(request: RetrieveRequest, knowledge_base: dict) -> Retr
     )
 
 
-def _notion_block_text(block: dict) -> str:
-    block_type = block.get("type")
-    value = block.get(block_type, {}) if block_type else {}
-    rich_text = value.get("rich_text", [])
-    if block_type == "table_row":
-        rich_text = [item for cell in value.get("cells", []) for item in cell]
-    text = "".join(item.get("plain_text", "") for item in rich_text if isinstance(item, dict))
-    return text.strip()
-
-
-async def _notion_page_text(client: httpx.AsyncClient, base_url: str, page: dict, headers: dict) -> tuple[str, str]:
-    title = "Notion page"
-    for prop in (page.get("properties") or {}).values():
-        if isinstance(prop, dict) and prop.get("type") == "title":
-            title = "".join(item.get("plain_text", "") for item in prop.get("title", [])) or title
-            break
-    page_id = str(page.get("id") or "")
-    content = []
-    cursor = None
-    for _ in range(3):
-        params = {"page_size": 100}
-        if cursor:
-            params["start_cursor"] = cursor
-        response = await client.get(f"{base_url}/blocks/{page_id}/children", headers=headers, params=params)
-        response.raise_for_status()
-        data = response.json()
-        for block in data.get("results", []):
-            text = _notion_block_text(block)
-            if text:
-                content.append(text)
-            if block.get("has_children"):
-                child = await client.get(
-                    f"{base_url}/blocks/{block['id']}/children", headers=headers, params={"page_size": 100}
-                )
-                child.raise_for_status()
-                for child_block in child.json().get("results", []):
-                    child_text = _notion_block_text(child_block)
-                    if child_text:
-                        content.append(child_text)
-        cursor = data.get("next_cursor") if data.get("has_more") else None
-        if not cursor:
-            break
-    return title, "\n".join([title, *content]).strip()
-
-
 async def _notion_retrieve(request: RetrieveRequest, knowledge_base: dict) -> RetrieveResponse:
-    notion = knowledge_base.get("config", {}).get("notion", {})
-    token = str(notion.get("token") or "").strip()
-    if not token:
-        raise ProviderUnavailable("Notion 连接未配置：请填写 Integration Token")
-    base_url = str(notion.get("base_url") or "https://api.notion.com/v1").rstrip("/")
-    if not base_url.startswith(("https://", "http://")):
-        raise ValueError("Notion API URL 必须是 http 或 https")
-    retrieval = knowledge_base.get("config", {}).get("retrieval", {})
-    top_k = min(request.final_top_k or request.top_k or retrieval.get("final_top_k", 8), 100)
-    headers = {"Authorization": f"Bearer {token}", "Notion-Version": notion.get("version", "2022-06-28")}
-    started = time.perf_counter()
-    evidences = []
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            f"{base_url}/search", headers=headers,
-            json={"query": request.query.strip(), "page_size": top_k, "filter": {"property": "object", "value": "page"}},
+    config = knowledge_base.get("config", {})
+    notion = config.get("notion", {})
+    base_url = str(notion.get("base_url") or NOTION_API_BASE).rstrip("/")
+    if base_url != NOTION_API_BASE:
+        raise ValueError("当前 Yuxi Notion 连接器只支持官方 Notion API 地址")
+    try:
+        additional_params = NotionKB.validate_additional_params(
+            {
+                "notion_token": notion.get("token") or "",
+                "notion_data_source_id": notion.get("data_source_id") or "",
+                "notion_version": notion.get("version") or "2026-03-11",
+            }
         )
-        response.raise_for_status()
-        records = response.json().get("results", [])
-        for rank, page in enumerate(records[:top_k], start=1):
-            title, text = await _notion_page_text(client, base_url, page, headers)
-            if not text.strip():
-                continue
-            page_id = str(page.get("id") or rank)
-            evidence_id = f"NOTION-{page_id}"
-            evidences.append(
-                Evidence(
-                    evidence_id=evidence_id,
-                    document_id=page_id,
-                    chunk_id=evidence_id,
-                    file_name=title,
-                    text=text,
-                    token_count=count_tokens(text),
-                    metadata={"provider": "notion", "rank": rank, "url": page.get("url")},
-                )
+    except ValueError as exc:
+        raise ProviderUnavailable(f"Notion 连接未配置：{exc}") from exc
+    retrieval = config.get("retrieval", {})
+    top_k = request.final_top_k or request.top_k or retrieval.get("final_top_k", 8)
+    search_mode = retrieval.get("notion_search_mode", "hybrid")
+    query_config = KnowledgeBaseConfig(
+        kb_id=str(knowledge_base["id"]),
+        kb_type="notion",
+        query_params={
+            "options": {
+                "search_mode": search_mode,
+                "final_top_k": top_k,
+                "max_scan_pages": retrieval.get("notion_max_scan_pages", 100),
+                "max_hydrate_pages": retrieval.get("notion_max_hydrate_pages", 20),
+                "snippet_window_lines": retrieval.get("notion_snippet_window_lines", 12),
+            }
+        },
+        additional_params=additional_params,
+    )
+    started = time.perf_counter()
+    results = await NotionKB(str(settings.rag_upload_dir)).aquery(
+        request.query.strip(), str(knowledge_base["id"]), config=query_config
+    )
+    evidences = []
+    for rank, result in enumerate(results[:top_k], start=1):
+        metadata = result.get("metadata") or {}
+        text = result.get("content")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        page_id = str(metadata.get("file_id") or rank)
+        chunk_id = str(metadata.get("chunk_id") or page_id)
+        score = float(result.get("score") or 0.0)
+        evidences.append(
+            Evidence(
+                evidence_id=f"NOTION-{knowledge_base['id']}-{chunk_id}",
+                document_id=page_id,
+                chunk_id=chunk_id,
+                file_name=str(metadata.get("source") or "Notion page"),
+                text=text,
+                token_count=count_tokens(text),
+                fusion_score=score,
+                scores={"bm25": None, "vector": None, "fusion": score, "rerank": None},
+                metadata={"provider": "notion", "rank": rank, "url": metadata.get("notion_url"), **metadata},
             )
+        )
     elapsed = round((time.perf_counter() - started) * 1000, 2)
     final_context = "\n\n".join(f"[{item.evidence_id}] {item.file_name}\n{item.text}" for item in evidences)
     return RetrieveResponse(
         query=request.query.strip(),
         evidences=evidences,
-        retrieval={"mode": "notion-search", "search_mode": "keyword", "candidate_count": len(evidences),
+        retrieval={"mode": "notion-yuxi-connector", "search_mode": search_mode, "candidate_count": len(results),
                    "recall_top_k": request.recall_top_k or top_k, "final_top_k": top_k,
                    "use_reranker": False, "rerank_status": "not_supported_by_connector"},
         timing_ms={"notion": elapsed, "total": elapsed},
@@ -1175,7 +1199,7 @@ async def test_knowledge_base_connection(knowledge_base_id: str):
         if not vectors:
             raise HTTPException(status_code=502, detail="Embedding 服务没有返回向量")
         return {"ok": True, "provider": "embedding", "model": embedding.get("model"), "dimensions": len(vectors[0])}
-    except (ProviderUnavailable, ValueError, httpx.HTTPError) as exc:
+    except (ProviderUnavailable, NotionAPIError, ValueError, httpx.HTTPError) as exc:
         raise _provider_error(exc) from exc
 
 
@@ -1374,7 +1398,7 @@ async def retrieve_api(request: RetrieveRequest):
         if knowledge_base and knowledge_base["kb_type"] == "notion":
             return await _notion_retrieve(request, knowledge_base)
         return await retrieve(request)
-    except (ProviderUnavailable, ValueError, httpx.HTTPError) as exc:
+    except (ProviderUnavailable, NotionAPIError, ValueError, httpx.HTTPError) as exc:
         raise _provider_error(exc) from exc
 
 
@@ -1434,7 +1458,7 @@ async def debug_retrieve_api(request: RetrieveRequest):
                 "final_context": result.final_context,
             }
         return await retrieve_debug(request)
-    except (ProviderUnavailable, ValueError, httpx.HTTPError) as exc:
+    except (ProviderUnavailable, NotionAPIError, ValueError, httpx.HTTPError) as exc:
         raise _provider_error(exc) from exc
 
 
@@ -1458,10 +1482,13 @@ async def evaluation(request: EvaluationRequest):
                 result = await _notion_retrieve(retrieval_request, knowledge_base)
             else:
                 result = await retrieve(retrieval_request)
-        except (ProviderUnavailable, ValueError, httpx.HTTPError) as exc:
+        except (ProviderUnavailable, NotionAPIError, ValueError, httpx.HTTPError) as exc:
             raise _provider_error(exc) from exc
         relevant = set(case.relevant_evidence_ids)
         returned = [item.evidence_id for item in result.evidences]
+        yuxi_metrics = calculate_retrieval_metrics(
+            result.evidences, case.relevant_evidence_ids, case.top_k
+        )
         hits = [index for index, evidence_id in enumerate(returned, start=1) if evidence_id in relevant]
         reciprocal_rank = 1 / hits[0] if hits else 0.0
         dcg = sum(1 / math.log2(rank + 1) for rank in hits)
@@ -1471,8 +1498,9 @@ async def evaluation(request: EvaluationRequest):
                 "query": case.query,
                 "returned_evidence_ids": returned,
                 "relevant_evidence_ids": sorted(relevant),
-                "recall_at_k": len(hits) / len(relevant) if relevant else 0.0,
-                "precision_at_k": len(hits) / case.top_k,
+                "recall_at_k": yuxi_metrics["recall_at_k"],
+                "precision_at_k": yuxi_metrics["precision_at_k"],
+                "yuxi_metrics": yuxi_metrics["yuxi_metrics"],
                 "mrr": reciprocal_rank,
                 "ndcg_at_k": dcg / ideal if ideal else 0.0,
                 "top_k": case.top_k,
@@ -1504,5 +1532,9 @@ async def evidence(evidence_id: str):
 
 
 from .yuxi_compat import router as yuxi_compat_router
+from .provider_api import router as provider_api_router
+from .ocr_api import router as ocr_api_router
 
 app.include_router(yuxi_compat_router)
+app.include_router(provider_api_router)
+app.include_router(ocr_api_router)

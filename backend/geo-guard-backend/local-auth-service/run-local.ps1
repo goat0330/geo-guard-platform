@@ -1,7 +1,12 @@
 $ErrorActionPreference = 'Stop'
 $jar = Join-Path $PSScriptRoot 'target\geo-guard-local-auth-0.1.0.jar'
+$jdk = Join-Path (Split-Path -Parent $PSScriptRoot) '.offline-build-kit\jdk'
+$java = Join-Path $jdk 'bin\java.exe'
 if (-not (Test-Path -LiteralPath $jar)) {
     throw '尚未构建服务。请先运行 .\build-local.ps1'
+}
+if (-not (Test-Path -LiteralPath $java)) {
+    throw '离线构建包中的 JDK 21 不存在。请先运行 ..\build-offline.ps1 -KitArchive <离线构建包路径>。'
 }
 if (Get-NetTCPConnection -State Listen -LocalPort 8007 -ErrorAction SilentlyContinue) {
     throw '本机 8007 端口已有服务监听；请先确认该服务归属，不要自动终止它。'
@@ -21,7 +26,7 @@ $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword
 try {
     $env:GEO_LOCAL_AUTH_USERNAME = $username
     $env:GEO_LOCAL_AUTH_PASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
-    & java -jar $jar --server.address=127.0.0.1 --server.port=8007 --spring.servlet.multipart.enabled=false
+    & $java -jar $jar --server.address=127.0.0.1 --server.port=8007 --spring.servlet.multipart.enabled=false
     if ($LASTEXITCODE -ne 0) {
         throw "Java 服务退出，代码 $LASTEXITCODE"
     }

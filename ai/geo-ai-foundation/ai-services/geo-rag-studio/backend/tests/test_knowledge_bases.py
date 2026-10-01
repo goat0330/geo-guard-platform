@@ -39,11 +39,16 @@ def test_local_knowledge_base_isolates_documents_and_hides_api_keys(tmp_path, mo
 
     updated = client.put(
         f"/api/v1/knowledge-bases/{knowledge_base['id']}",
-        json={"config": {"embedding": {"base_url": "https://example.invalid/v1", "model": "bge-m3", "api_key": "secret-test-key"}}},
+        json={"config": {
+            "embedding": {"base_url": "https://example.invalid/v1", "model": "bge-m3", "api_key": "secret-test-key"},
+            "parser": {"engine": "mineru_official", "api_key": "mineru-debug-secret"},
+        }},
     )
     assert updated.status_code == 200
     assert updated.json()["config"]["embedding"]["api_key_set"] is True
     assert "api_key" not in updated.json()["config"]["embedding"]
+    assert updated.json()["config"]["parser"]["api_key_set"] is True
+    assert "api_key" not in updated.json()["config"]["parser"]
 
     listed = client.get(f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents")
     assert listed.status_code == 200
@@ -59,6 +64,9 @@ def test_local_knowledge_base_isolates_documents_and_hides_api_keys(tmp_path, mo
     )
     assert retrieval.status_code == 200
     assert retrieval.json()["result"]["evidences"]
+    assert retrieval.json()["config_snapshot"]["parser"]["api_key_set"] is True
+    assert "api_key" not in retrieval.json()["config_snapshot"]["parser"]
+    assert "mineru-debug-secret" not in retrieval.text
 
     empty_retrieval = client.post(
         "/api/v1/debug/retrieve",
@@ -66,6 +74,42 @@ def test_local_knowledge_base_isolates_documents_and_hides_api_keys(tmp_path, mo
     )
     assert empty_retrieval.status_code == 200
     assert empty_retrieval.json()["result"]["evidences"] == []
+
+
+def test_keyword_bm25_does_not_apply_vector_similarity_threshold(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "rag_db_path", str(tmp_path / "rag.sqlite3"))
+    monkeypatch.setattr(settings, "rag_upload_dir", str(tmp_path / "uploads"))
+    monkeypatch.setattr(settings, "embedding_base_url", "")
+    monkeypatch.setattr(settings, "embedding_api_key", "")
+    monkeypatch.setattr(settings, "embedding_model", "")
+
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/knowledge-bases",
+        json={
+            "name": "BM25 threshold semantics",
+            "kb_type": "local",
+            "config": {"retrieval": {"search_mode": "keyword", "similarity_threshold": 0.99}},
+        },
+    )
+    kb_id = created.json()["id"]
+    added = client.post(
+        "/api/v1/documents/text",
+        json={
+            "file_name": "bm25.txt",
+            "text": "坡体裂缝复核需要查阅长期降雨、坡面位移、巡查记录和周边排水情况。",
+            "knowledge_base_id": kb_id,
+        },
+    )
+    assert added.status_code == 200, added.text
+
+    response = client.post(
+        "/api/v1/debug/retrieve",
+        json={"query": "坡体裂缝", "filters": {"knowledge_base_id": kb_id}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["evidences"]
 
 
 def test_pdf_indexes_retrieves_and_locates_bbox(tmp_path, monkeypatch, pdf_sample):

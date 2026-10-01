@@ -6,6 +6,9 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .chat import complete_chat
+from .embedding import embed_batched, enabled as embedding_enabled
+
 from . import db
 
 
@@ -17,6 +20,57 @@ def _fingerprint(document_ids: list[str]) -> str:
 
 def indexed_content_fingerprint(document_ids: list[str]) -> str:
     return _fingerprint(document_ids)
+
+
+async def index_knowledge_graph_vectors(knowledge_base: dict, graph: dict) -> dict:
+    """Index entity and relation vectors in local SQLite, matching Yuxi's graph-vector records."""
+    knowledge_base_id = knowledge_base["id"]
+    embedding_config = (knowledge_base.get("config") or {}).get("embedding") or {}
+    model = str(embedding_config.get("model") or "")
+    fingerprint = str(graph.get("source_fingerprint") or "")
+    if not embedding_enabled(embedding_config):
+        db.replace_knowledge_graph_embeddings(knowledge_base_id, fingerprint, model, [])
+        return {"status": "unavailable", "model": model or None, "record_count": 0,
+                "error": "Embedding provider 未配置，图结构已保存但图向量检索不可用"}
+
+    nodes = graph.get("nodes") or []
+    node_by_id = {str(node.get("id")): node for node in nodes if node.get("id")}
+    records = []
+    for node in nodes:
+        name = " ".join(str(node.get("name") or node.get("text") or "").strip().lower().split())
+        if node.get("type") != "Chunk" and name:
+            records.append({"record_type": "entity", "record_id": str(node["id"]), "content": name})
+    for edge in graph.get("edges") or []:
+        if edge.get("type") == "MENTIONS":
+            continue
+        source = node_by_id.get(str(edge.get("source") or ""), {})
+        target = node_by_id.get(str(edge.get("target") or ""), {})
+        source_name = " ".join(str(source.get("name") or source.get("text") or "").strip().lower().split())
+        target_name = " ".join(str(target.get("name") or target.get("text") or "").strip().lower().split())
+        if source_name and target_name and edge.get("id"):
+            relation_type = str(edge.get("type") or "RELATED_TO")
+            records.append({
+                "record_type": "triple",
+                "record_id": str(edge["id"]),
+                "content": f"{source_name} → {relation_type} → {target_name}",
+            })
+
+    if not records:
+        db.replace_knowledge_graph_embeddings(knowledge_base_id, fingerprint, model, [])
+        return {"status": "indexed", "model": model, "record_count": 0}
+    try:
+        vectors = await embed_batched([record["content"] for record in records], embedding_config)
+    except (httpx.HTTPError, ValueError) as exc:
+        db.replace_knowledge_graph_embeddings(knowledge_base_id, fingerprint, model, [])
+        return {"status": "error", "model": model, "record_count": 0,
+                "error": f"Embedding provider 请求失败：{type(exc).__name__}"}
+    if vectors is None or len(vectors) != len(records):
+        db.replace_knowledge_graph_embeddings(knowledge_base_id, fingerprint, model, [])
+        return {"status": "error", "model": model, "record_count": 0,
+                "error": "Embedding provider 未返回与实体/三元组数量对齐的向量"}
+    indexed = [{**record, "embedding": vector} for record, vector in zip(records, vectors, strict=True)]
+    count = db.replace_knowledge_graph_embeddings(knowledge_base_id, fingerprint, model, indexed)
+    return {"status": "indexed", "model": model, "record_count": count}
 
 
 async def build_entity_graph(knowledge_base: dict) -> dict:
@@ -191,6 +245,8 @@ async def _chat_completion(client: httpx.AsyncClient, options: dict, messages: l
     base_url = str(options.get("base_url") or "").strip().rstrip("/")
     model = str(options.get("model") or options.get("model_spec") or "").strip()
     api_key = str(options.get("api_key") or "").strip()
+    if not api_key and ":" in model:
+        return await complete_chat(messages, model, timeout=180.0)
     if not base_url or not model or not api_key:
         raise RuntimeError("LLM 未配置；请填写 OpenAI-Compatible Base URL、模型和 API Key")
     endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"

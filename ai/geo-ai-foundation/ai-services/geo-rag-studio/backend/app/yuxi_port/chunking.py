@@ -4,13 +4,12 @@ import re
 import uuid
 
 from .chunk_presets import CHUNK_ENGINE_VERSION, normalize_chunk_config, normalize_preset
-from .ragflow_like.dispatcher import chunk_markdown as dispatch_chunk_markdown
-from .ragflow_like.nlp import count_tokens, hard_split_by_token_limit
+from . import _upstream  # noqa: F401
+from yuxi.knowledge.chunking.ragflow_like.dispatcher import chunk_markdown as yuxi_chunk_markdown
+from yuxi.knowledge.chunking.ragflow_like.nlp import count_tokens
+from yuxi.knowledge.chunking.ragflow_like.parsers.semantic import chunk_markdown as yuxi_semantic_chunk_markdown
 
 PREFIX_RE = re.compile(r"^(?:#{1,6}\s*|(?:Q|Question|问|问题|A|Answer|答|回答)\s*[:：]\s*)", re.I)
-QA_PAIR_RE = re.compile(r"^(问题|Question)([:：])\s*(.*?)\t(回答|Answer)([:：])\s*(.*)$", re.I | re.S)
-
-
 def _id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
@@ -57,23 +56,22 @@ def _source_span(block: dict) -> dict:
     }
 
 
-def _bound_chunk(text: str, preset: str, target: int) -> list[str]:
-    if count_tokens(text) <= target:
-        return [text]
+def _yuxi_chunks(markdown: str, preset: str, config: dict, file_name: str, embed_fn):
+    if preset == "semantic":
+        chunks = yuxi_semantic_chunk_markdown(markdown, config, embed_fn=embed_fn)
+        fallback = embed_fn is None and count_tokens(markdown) > config["chunk_token_num"]
+        return chunks, fallback
 
-    pair = QA_PAIR_RE.match(text) if preset == "qa" else None
-    if pair:
-        question_head = f"{pair.group(1)}{pair.group(2)}{pair.group(3)}"
-        answer_head = f"{pair.group(4)}{pair.group(5)}"
-        base = f"{question_head}\t{answer_head}"
-        answer_budget = target - count_tokens(base)
-        if answer_budget > 0 and pair.group(6).strip():
-            answer_parts = hard_split_by_token_limit(pair.group(6), answer_budget)
-            result = [f"{base}{part}" for part in answer_parts]
-            if result and all(count_tokens(item) <= target for item in result):
-                return result
-
-    return hard_split_by_token_limit(text, target)
+    records = yuxi_chunk_markdown(
+        markdown_content=markdown,
+        file_id="geo-rag-source-map",
+        filename=file_name,
+        processing_params={
+            "chunk_preset_id": preset,
+            "chunk_parser_config": config,
+        },
+    )
+    return [record["content"] for record in records], False
 
 
 def _matched_blocks(
@@ -125,50 +123,48 @@ def chunk_blocks(
     preset = normalize_preset(preset_id)
     cfg = normalize_chunk_config(config)
     markdown = "\n".join(block.get("text", "") for block in blocks if block.get("text", "").strip())
-    raw_chunks, semantic_fallback = dispatch_chunk_markdown(markdown, file_name, preset, cfg, embed_fn=embed_fn)
+    raw_chunks, semantic_fallback = _yuxi_chunks(markdown, preset, cfg, file_name, embed_fn)
     source_text, source_owners, source_lines = _source_map(blocks)
 
     chunks = []
     search_from = 0
     for raw_text in raw_chunks:
-        for text in _bound_chunk((raw_text or "").strip(), preset, cfg["chunk_token_num"]):
-            if not text:
+        text = (raw_text or "").strip()
+        if not text:
+            continue
+        matched, search_from, source_mapping = _matched_blocks(text, source_text, source_owners, source_lines, search_from)
+        source_spans = []
+        seen = set()
+        for block in matched:
+            key = (block.get("id"), block.get("page"), tuple(block.get("bbox") or []))
+            if key in seen:
                 continue
-            matched, search_from, source_mapping = _matched_blocks(
-                text, source_text, source_owners, source_lines, search_from
-            )
-            source_spans = []
-            seen = set()
-            for block in matched:
-                key = (block.get("id"), block.get("page"), tuple(block.get("bbox") or []))
-                if key in seen:
-                    continue
-                seen.add(key)
-                source_spans.append(_source_span(block))
+            seen.add(key)
+            source_spans.append(_source_span(block))
 
-            metadata = {
-                "preset": preset,
-                "chunk_engine_version": CHUNK_ENGINE_VERSION,
-                "token_count_method": "yuxi-approximate-cjk-char-word-v1",
-                "source_mapping": source_mapping,
-            }
-            if preset == "qa":
-                question = re.search(
-                    r"(?:问题|Question)\s*[:：]\s*(.*?)(?:\s*(?:回答|Answer)\s*[:：]|$)",
-                    text,
-                    flags=re.I | re.S,
-                )
-                if question:
-                    metadata["question"] = question.group(1).strip()
-            if semantic_fallback:
-                metadata["semantic_fallback"] = True
-            chunks.append(
-                {
-                    "id": _id("CHK"),
-                    "text": text,
-                    "token_count": count_tokens(text),
-                    "source_spans": source_spans,
-                    "metadata": metadata,
-                }
+        metadata = {
+            "preset": preset,
+            "chunk_engine_version": CHUNK_ENGINE_VERSION,
+            "token_count_method": "yuxi-approximate-cjk-char-word-v1",
+            "source_mapping": source_mapping,
+        }
+        if preset == "qa":
+            question = re.search(
+                r"(?:问题|Question)\s*[:：]\s*(.*?)(?:\s*(?:回答|Answer)\s*[:：]|$)",
+                text,
+                flags=re.I | re.S,
             )
+            if question:
+                metadata["question"] = question.group(1).strip()
+        if semantic_fallback:
+            metadata["semantic_fallback"] = True
+        chunks.append(
+            {
+                "id": _id("CHK"),
+                "text": text,
+                "token_count": count_tokens(text),
+                "source_spans": source_spans,
+                "metadata": metadata,
+            }
+        )
     return chunks

@@ -1,0 +1,45 @@
+/* @author kongweiguang */
+package cn.edu.pku.whai.geological.disaster.data.domain.vo;
+
+import lombok.Data;
+
+import java.io.Serial;
+import java.io.Serializable;
+
+/**
+ * 点命中房屋信息
+ *
+ * @author zhuzc
+ * @date 2026-06-09
+ */
+@Data
+public class PointHouseInfoVo implements Serializable {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    /**
+     * 房屋ID
+     */
+    private String houseId;
+
+    /**
+     * 户室唯一ID
+     */
+    private String houseUnitId;
+
+    /**
+     * 房屋建筑代码
+     */
+    private String buildingCode;
+
+    /**
+     * 房屋名称
+     */
+    private String buildingName;
+
+    /**
+     * 人数
+     */
+    private Long personCount;
+}

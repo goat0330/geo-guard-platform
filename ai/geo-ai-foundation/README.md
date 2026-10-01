@@ -17,13 +17,13 @@ PostgreSQL/Redis configuration and schema before it can run as a business backen
 
 ## 当前实现
 
-- `geo-rag-studio`：SQLite + 本地 PDF/文本；PyMuPDF layout、页码和 bbox；Yuxi RAGFlow-style General/QA/Book/Laws/Semantic/Separator chunkers；Semantic 使用知识库配置的 embedding API 做聚类，没有 Provider 时显式标记 fallback；BM25、OpenAI-compatible embedding/reranker、MinerU 自部署 `/file_parse` 与官方 batch API 适配器、Evidence 原文定位、Final Context 和人工标注 Evidence ID Evaluation。知识图谱与思维导图使用知识库保存的 OpenAI-Compatible LLM 配置实际抽取/生成；未配置时明确返回 unavailable，不产出关键词图或来源轮廓冒充模型结果。
+- `geo-rag-studio`：SQLite + 本地 PDF/文本保存元数据与原文；PyMuPDF layout、页码和 bbox；Yuxi RAGFlow-style General/QA/Book/Laws/Semantic/Separator chunkers；Milvus 2.5.6 + SeaweedFS 可复现栈提供原生 BM25、COSINE 向量与 WeightedRanker，SQLite BM25 是轻量 fallback；Semantic 使用知识库配置的 embedding API 做聚类，没有 Provider 时显式标记 fallback；还包括 OpenAI-compatible embedding/reranker、MinerU 自部署 `/file_parse` 与官方 batch API 适配器、Evidence 原文定位、Final Context 和人工标注 Evidence ID Evaluation。知识图谱与思维导图使用知识库保存的 OpenAI-Compatible LLM 配置实际抽取/生成；未配置时明确返回 unavailable，不产出关键词图或来源轮廓冒充模型结果。
 - `geo-agent-graph`：隐患复核图包含输入规范化、业务上下文、证据召回、候选匹配、字段核验、一次补充检索、风险分类、结构化结果和人工复核。Trace 是真实节点的运行/完成状态，不含模型隐藏思维链。
 - Spring Boot：`POST /dizai/ai/rag/retrieve`、`/dizai/ai/rag/debug/retrieve`、`/dizai/ai/graph/run`、`/dizai/ai/graph/run/stream`；隐患点 ID 可通过既有业务服务读取基础记录，Dify 原接口保留。
 - 前端 AI Studio 的 RAG 请求经 Java :8007 转发到 :8010；Graph 当前开发入口仍经 Vite 代理访问 :8011。当前不读取业务数据库，不把输入 ID 当成已查到的记录。
-- Yuxi 原生 Vue 前端已整体复制到 `frontend/yuxi-web`，其知识库/扩展入口作为静态前端嵌入 AI Studio 的 `/yuxi/`。本地 SQLite 服务承载文件管理和 ZIP 文件夹上传、BM25/Vector/Fusion/Rerank、可配置 Embedding/Reranker、MinerU 自部署和官方 API、Dify/Notion 只读连接器、LLM 实体关系图谱、LLM 思维导图和 Evidence ID 评测。官方 MinerU API Key 可以按知识库配置，也可以写入被忽略的 `.env`；服务端响应只返回配置状态，解析测试会实际上传所选 PDF。它不是 Yuxi 后端基础设施的逐项复制：Milvus、Neo4j、图谱向量索引、分布式任务和多用户权限不包含；无 LLM 时依赖模型的生成能力明确返回 unavailable。
+- Yuxi 原生 Vue 前端已整体复制到 `frontend/yuxi-web`，其知识库/扩展入口作为静态前端嵌入 AI Studio 的 `/yuxi/`。Geo SQLite 服务承载文件管理和 ZIP 文件夹上传，Milvus/SeaweedFS 承载可选搜索索引，并提供可配置 Embedding/Reranker、MinerU 自部署和官方 API、Dify/Notion 只读连接器、LLM 实体关系图谱、LLM 思维导图和 Evidence ID 评测。官方 MinerU API Key 可以按知识库配置，也可以写入被忽略的 `.env`；服务端响应只返回配置状态，解析测试会实际上传所选 PDF。它不是 Yuxi 后端基础设施的逐项复制：Geo 使用独立 Milvus/SeaweedFS 实例，不连接 Yuxi 的服务、数据卷或配置；Neo4j、图谱向量索引、分布式任务和多用户权限不包含；无 LLM 时依赖模型的生成能力明确返回 unavailable。
 
-本地 Yuxi 源码审阅位置：`the upstream Yuxi source tree`。本机工作树 commit 为 `caff3208c9db9128aa0b277bc5c669141383ddbd`；v0.2 压缩包记录的 `031e2c...` commit 在本机克隆中不可解析。因此这里记录为基于本地源码重实现的 Yuxi-derived 部件，不宣称与压缩包引用 commit 做过逐文件 diff。Yuxi 工作树未修改。
+Yuxi 上游工作树 commit 为 `caff3208c9db9128aa0b277bc5c669141383ddbd`；v0.2 压缩包记录的 `031e2c...` commit 在本机克隆中不可解析。前端知识库界面按可追溯文件清单直接迁入；后端知识库相关代码直接 vendoring 并由 Geo API/存储适配层调用，不是把 Yuxi 整仓和整套 Docker Harness 原样复制。Yuxi 工作树未修改。
 
 ## 本地启动
 
@@ -34,7 +34,14 @@ $AiRoot = 'ai/geo-ai-foundation/ai-services'
 & "$AiRoot\.venv\Scripts\python.exe" -m pip install -e "$AiRoot\geo-rag-studio\backend[test]" -e "$AiRoot\geo-agent-graph"
 ```
 
-在两个 PowerShell 窗口分别运行。工作目录很重要：RAG 数据默认保存在 `geo-rag-studio\data`。
+在 RAG 后端目录先复制/合并 `.env.example` 中的 Milvus 设置到被忽略的 `.env`，再启动 Geo 独立索引栈。不要覆盖已有 `.env` 里的用户配置。该栈使用本项目自己的 Docker Compose 项目、卷和 `:19531` 端口，不读取或修改 Yuxi 的容器与数据。
+
+```powershell
+Set-Location 'ai/geo-ai-foundation/ai-services/geo-rag-studio/backend'
+docker compose -f docker-compose.milvus.yml up -d
+```
+
+然后启动两个 Python 服务。工作目录很重要：RAG 元数据与文件默认保存在 `geo-rag-studio\data`。
 
 ```powershell
 Set-Location 'ai/geo-ai-foundation/ai-services\geo-rag-studio\backend'

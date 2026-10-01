@@ -3,14 +3,18 @@ import re
 import time
 from collections import Counter
 
-from . import db
+import jieba
+
+from . import db, milvus_store
 from .config import settings
-from .embedding import embed_texts, enabled as embedding_enabled
+from .embedding import embed_batched, embed_texts, enabled as embedding_enabled
 from .knowledge_features import indexed_content_fingerprint as _source_fingerprint
 from .schemas import Evidence, RetrieveRequest, RetrieveResponse, SourceSpan
+from .yuxi_port.graph import fuse_chunk_rankings, rank_chunks_by_ppr, seed_subgraph
+from .yuxi_port.milvus_ranker import weighted_hybrid_score
 from .yuxi_port.rerank import enabled as rerank_enabled, rerank
 
-TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff]+", re.UNICODE)
+TOKEN_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]+")
 
 
 class ProviderUnavailable(RuntimeError):
@@ -18,16 +22,10 @@ class ProviderUnavailable(RuntimeError):
 
 
 def tokenize(text: str) -> list[str]:
-    tokens = TOKEN_RE.findall((text or "").lower())
-    output = []
-    for token in tokens:
-        if any("\u4e00" <= char <= "\u9fff" for char in token) and len(token) > 1:
-            output.extend(token[index : index + 2] for index in range(len(token) - 1))
-        output.append(token)
-    return output
+    return [token for token in jieba.cut_for_search(text or "") if TOKEN_RE.fullmatch(token)]
 
 
-def bm25_scores(query: str, documents: list[str], k1: float = 1.5, b: float = 0.75, drop_ratio_search: float = 0.0) -> list[float]:
+def bm25_scores(query: str, documents: list[str], k1: float = 1.2, b: float = 0.75, drop_ratio_search: float = 0.0) -> list[float]:
     if not documents:
         return []
     tokenized = [tokenize(text) for text in documents]
@@ -66,16 +64,6 @@ def cosine(left: list[float] | None, right: list[float] | None) -> float | None:
     left_norm = math.sqrt(sum(x * x for x in left))
     right_norm = math.sqrt(sum(y * y for y in right))
     return dot / (left_norm * right_norm) if left_norm and right_norm else 0.0
-
-
-def _normalize(values: list[float | None]) -> list[float | None]:
-    present = [value for value in values if value is not None]
-    if not present:
-        return values
-    low, high = min(present), max(present)
-    if high - low < 1e-12:
-        return [1.0 if value is not None else None for value in values]
-    return [((value - low) / (high - low)) if value is not None else None for value in values]
 
 
 def _stage_row(chunk: dict, score: float, rank: int, stage_score: str) -> dict:
@@ -125,6 +113,24 @@ def _rank(chunks: list[dict], scores: list[float | None], top_k: int, label: str
     ]
 
 
+def _attach_milvus_rankings(hits: list[dict], chunks: list[dict], label: str, include_distances: bool) -> list[dict]:
+    by_id = {chunk["id"]: chunk for chunk in chunks}
+    ranked = []
+    for hit in hits:
+        chunk = by_id.get(hit.get("chunk_id"))
+        if not chunk:
+            continue
+        score = float(hit[label])
+        item = {**chunk, label: score, "rank": int(hit["rank"])}
+        for score_name in ("bm25", "vector", "hybrid"):
+            if hit.get(score_name) is not None:
+                item[score_name] = float(hit[score_name])
+        if include_distances:
+            item["distance"] = score
+        ranked.append(item)
+    return ranked
+
+
 async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
     started = time.perf_counter()
     query = req.query.strip()
@@ -137,6 +143,7 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
     embedding_config = kb_config.get("embedding", {})
     reranker_config = kb_config.get("reranker", {})
     search_mode = req.search_mode or retrieval_config.get("search_mode", "hybrid")
+    include_distances = req.include_distances if req.include_distances is not None else bool(retrieval_config.get("include_distances", True))
     use_reranker = req.use_reranker if req.use_reranker is not None else bool(retrieval_config.get("use_reranker", False))
     final_top_k = req.final_top_k or req.top_k or retrieval_config.get("final_top_k") or settings.default_final_top_k
     requested_recall = req.recall_top_k or retrieval_config.get("recall_top_k")
@@ -145,7 +152,12 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
     bm25_drop_ratio_search = req.bm25_drop_ratio_search if req.bm25_drop_ratio_search is not None else retrieval_config.get("bm25_drop_ratio_search", 0.0)
     similarity_threshold = req.similarity_threshold if req.similarity_threshold is not None else retrieval_config.get("similarity_threshold", 0.0)
     use_graph = req.use_graph_retrieval if req.use_graph_retrieval is not None else bool(retrieval_config.get("use_graph_retrieval", False))
-    graph_weight = float(retrieval_config.get("graph_weight", 1.0))
+    graph_entity_top_k = req.graph_entity_top_k or int(retrieval_config.get("graph_entity_top_k", 10))
+    graph_triple_top_k = req.graph_triple_top_k or int(retrieval_config.get("graph_triple_top_k", 10))
+    graph_max_nodes = req.graph_max_nodes or int(retrieval_config.get("graph_max_nodes", 10000))
+    graph_top_k = req.graph_top_k or int(retrieval_config.get("graph_top_k", 20))
+    graph_weight = float(req.graph_weight if req.graph_weight is not None else retrieval_config.get("graph_weight", 1.0))
+    ppr_damping = float(req.ppr_damping if req.ppr_damping is not None else retrieval_config.get("ppr_damping", 0.85))
     if use_reranker and not rerank_enabled(reranker_config):
         raise ProviderUnavailable("Reranker requested but RERANK_BASE_URL, RERANK_API_KEY, and RERANK_MODEL are not configured")
     if search_mode == "vector" and not embedding_enabled(embedding_config):
@@ -156,121 +168,215 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
         empty = RetrieveResponse(
             query=query,
             evidences=[],
-            retrieval={"mode": "empty", "search_mode": search_mode, "candidate_count": 0, "recall_top_k": recall_top_k, "final_top_k": final_top_k, "use_reranker": use_reranker},
+            retrieval={"mode": "empty", "search_mode": search_mode, "candidate_count": 0, "recall_top_k": recall_top_k, "final_top_k": final_top_k, "use_reranker": use_reranker, "include_distances": include_distances},
             timing_ms={"total": round((time.perf_counter() - started) * 1000, 2)},
             usage={"embedding_enabled": embedding_enabled(embedding_config), "reranker_enabled": rerank_enabled(reranker_config), "context_tokens": 0},
             final_context="",
         )
         return empty, {"bm25": [], "vector": [], "graph": [], "fusion": [], "rerank": [], "final": []}
 
-    docs = [chunk["text"] for chunk in chunks]
     times = {}
     stages: dict[str, list[dict]] = {"bm25": [], "vector": [], "graph": [], "fusion": [], "rerank": []}
     has_stored_vectors = any(chunk.get("embedding") for chunk in chunks)
     if search_mode == "vector" and not has_stored_vectors:
         raise ProviderUnavailable("No indexed document embeddings are available; ingest documents with Embedding first")
-
-    mark = time.perf_counter()
-    bm25_raw = bm25_scores(query, docs, drop_ratio_search=bm25_drop_ratio_search) if search_mode != "vector" else [None] * len(chunks)
-    bm25_top = _rank(chunks, bm25_raw, bm25_top_k, "bm25")
-    times["bm25"] = round((time.perf_counter() - mark) * 1000, 2)
-    stages["bm25"] = [_stage_row(item, item["bm25"], rank, "bm25_raw") for rank, item in enumerate(bm25_top, 1)]
-
-    mark = time.perf_counter()
-    vector_raw: list[float | None] = [None] * len(chunks)
-    query_vector = None
-    vector_skip_reason = None
-    if search_mode != "keyword" and embedding_enabled(embedding_config) and has_stored_vectors:
-        query_vectors = await embed_texts([query], embedding_config)
-        if query_vectors:
-            query_vector = query_vectors[0]
-            active_embedding_model = (embedding_config or {}).get("model") or settings.embedding_model
-            for index, chunk in enumerate(chunks):
-                if chunk.get("embedding"):
-                    if chunk.get("embedding_model") != active_embedding_model:
-                        raise ProviderUnavailable("Stored vectors use a different embedding model; re-index these documents first")
-                    vector_raw[index] = cosine(query_vector, chunk["embedding"])
-        else:
-            vector_skip_reason = "embedding_api_returned_no_vector"
-    elif search_mode != "keyword":
-        vector_skip_reason = "no_indexed_vectors" if embedding_enabled(embedding_config) else "embedding_not_configured"
-    vector_top = _rank(chunks, vector_raw, recall_top_k, "vector")
-    times["vector"] = round((time.perf_counter() - mark) * 1000, 2)
-    stages["vector"] = [_stage_row(item, item["vector"], rank, "cosine_similarity") for rank, item in enumerate(vector_top, 1)]
-
-    mark = time.perf_counter()
-    bm25_norm = _normalize(bm25_raw)
-    vector_norm = _normalize(vector_raw)
     vector_weight = req.vector_weight if req.vector_weight is not None else retrieval_config.get("vector_weight", settings.vector_weight)
     bm25_weight = req.bm25_weight if req.bm25_weight is not None else retrieval_config.get("bm25_weight", settings.bm25_weight)
     if vector_weight + bm25_weight <= 0:
         raise ValueError("vector_weight and bm25_weight cannot both be zero")
-    graph_raw: list[float | None] = [None] * len(chunks)
-    graph_top = []
+    if settings.rag_search_backend == "milvus":
+        knowledge_base_id = str(req.filters.get("knowledge_base_id") or "")
+        if not knowledge_base_id:
+            raise ValueError("Milvus retrieval requires knowledge_base_id")
+        indexed = await milvus_store.search(
+            knowledge_base_id=knowledge_base_id,
+            query=query,
+            search_mode=search_mode,
+            recall_top_k=recall_top_k,
+            bm25_top_k=bm25_top_k,
+            drop_ratio_search=bm25_drop_ratio_search,
+            similarity_threshold=similarity_threshold,
+            vector_weight=vector_weight,
+            bm25_weight=bm25_weight,
+            document_ids=[item["document_id"] for item in chunks],
+            embedding_config=embedding_config,
+        )
+        bm25_top = _attach_milvus_rankings(indexed["bm25"], chunks, "bm25", include_distances)
+        vector_top = _attach_milvus_rankings(indexed["vector"], chunks, "vector", include_distances)
+        fusion_base = _attach_milvus_rankings(indexed["fusion"], chunks, "fusion", include_distances)
+        stages["bm25"] = [_stage_row(item, item["bm25"], rank, "milvus_bm25") for rank, item in enumerate(bm25_top, 1)]
+        stages["vector"] = [_stage_row(item, item["vector"], rank, "milvus_cosine") for rank, item in enumerate(vector_top, 1)]
+        stages["fusion"] = [_stage_row(item, item["fusion"], rank, "milvus_weighted_ranker_v2.5.6") for rank, item in enumerate(fusion_base, 1)]
+        times.update(indexed["timing"])
+        query_vector = True if indexed["embedding_query"] else None
+        vector_skip_reason = indexed["vector_skip_reason"]
+        hybrid_available = bool(query_vector is not None and has_stored_vectors)
+        base_fusion_ms = times.get("fusion", 0.0)
+    else:
+        docs = [chunk["text"] for chunk in chunks]
+        mark = time.perf_counter()
+        bm25_raw = bm25_scores(query, docs, drop_ratio_search=bm25_drop_ratio_search) if search_mode != "vector" else [None] * len(chunks)
+        bm25_top = _rank(chunks, bm25_raw, bm25_top_k, "bm25")
+        times["bm25"] = round((time.perf_counter() - mark) * 1000, 2)
+        stages["bm25"] = [_stage_row(item, item["bm25"], rank, "bm25_raw") for rank, item in enumerate(bm25_top, 1)]
+
+        mark = time.perf_counter()
+        vector_raw: list[float | None] = [None] * len(chunks)
+        query_vector = None
+        vector_skip_reason = None
+        if search_mode != "keyword" and embedding_enabled(embedding_config) and has_stored_vectors:
+            query_vectors = await embed_texts([query], embedding_config)
+            if query_vectors:
+                query_vector = query_vectors[0]
+                active_embedding_model = (embedding_config or {}).get("model") or settings.embedding_model
+                for index, chunk in enumerate(chunks):
+                    if chunk.get("embedding"):
+                        if chunk.get("embedding_model") != active_embedding_model:
+                            raise ProviderUnavailable("Stored vectors use a different embedding model; re-index these documents first")
+                        vector_raw[index] = cosine(query_vector, chunk["embedding"])
+            else:
+                vector_skip_reason = "embedding_api_returned_no_vector"
+        elif search_mode != "keyword":
+            vector_skip_reason = "no_indexed_vectors" if embedding_enabled(embedding_config) else "embedding_not_configured"
+        vector_top = _rank(chunks, vector_raw, recall_top_k, "vector")
+        times["vector"] = round((time.perf_counter() - mark) * 1000, 2)
+        stages["vector"] = [_stage_row(item, item["vector"], rank, "cosine_similarity") for rank, item in enumerate(vector_top, 1)]
+        hybrid_available = query_vector is not None and has_stored_vectors
+
+        mark = time.perf_counter()
+        candidates = {}
+        for item in bm25_top + vector_top:
+            candidates[item["id"]] = {**candidates.get(item["id"], {}), **item}
+        fused = []
+        for item in candidates.values():
+            if search_mode == "keyword":
+                score = item.get("bm25")
+            elif search_mode == "vector":
+                score = item.get("vector")
+            elif not hybrid_available:
+                score = item.get("bm25")
+            else:
+                score = weighted_hybrid_score(
+                    vector_score=item.get("vector"),
+                    bm25_score=item.get("bm25"),
+                    vector_weight=vector_weight,
+                    bm25_weight=bm25_weight,
+                )
+            if score is not None:
+                fused.append((item, score))
+        fused.sort(key=lambda item: item[1], reverse=True)
+        fusion_base = [
+            {
+                **item,
+                "fusion": score,
+                **({"hybrid": score} if search_mode == "hybrid" and hybrid_available else {}),
+                **({"distance": score} if include_distances else {}),
+            }
+            for item, score in fused
+        ]
+        if search_mode == "vector" or (search_mode == "hybrid" and hybrid_available):
+            fusion_base = [item for item in fusion_base if item["fusion"] >= similarity_threshold]
+        fusion_base = fusion_base[:recall_top_k]
+        base_fusion_ms = (time.perf_counter() - mark) * 1000
+
+    mark = time.perf_counter()
+    graph_top: list[dict] = []
     graph_status = "skipped"
+    graph_view = None
     if use_graph:
-        graph_view = db.get_knowledge_view(str(req.filters.get("knowledge_base_id") or ""), "graph")
-        if graph_view:
+        knowledge_base_id = str(req.filters.get("knowledge_base_id") or "")
+        graph_view = db.get_knowledge_view(knowledge_base_id, "graph") if knowledge_base_id else None
+        if not graph_view:
+            graph_status = "not_built"
+        else:
             graph = graph_view["payload"]
             current_document_ids = sorted({chunk["document_id"] for chunk in chunks})
             graph_is_current = (
                 sorted(graph.get("source_document_ids", [])) == current_document_ids
                 and graph.get("source_fingerprint") == _source_fingerprint(current_document_ids)
             )
-            if graph_is_current:
-                query_folded = query.casefold()
-                matching_entities = {
-                    node["id"] for node in graph.get("nodes", [])
-                    if node.get("type") != "Chunk"
-                    and str(node.get("name") or node.get("text") or "").strip()
-                    and str(node.get("name") or node.get("text") or "").casefold() in query_folded
-                }
-                graph_chunk_hits = Counter()
-                for edge in graph.get("edges", []):
-                    if edge.get("type") == "MENTIONS" and edge.get("target") in matching_entities:
-                        graph_chunk_hits[str(edge.get("chunk_id") or "")] += 1
-                    elif (edge.get("source") in matching_entities or edge.get("target") in matching_entities) and edge.get("chunk_id"):
-                        graph_chunk_hits[str(edge["chunk_id"])] += 1
-                for index, chunk in enumerate(chunks):
-                    score = float(graph_chunk_hits.get(chunk["id"], 0))
-                    if score:
-                        graph_raw[index] = score
-                graph_top = _rank(chunks, graph_raw, recall_top_k, "graph")
-                graph_status = "completed"
-            else:
+            vector_index = graph.get("vector_index") or {}
+            active_embedding_model = str((embedding_config or {}).get("model") or settings.embedding_model or "")
+            if not graph_is_current:
                 graph_status = "outdated"
-        else:
-            graph_status = "not_built"
-    graph_norm = _normalize(graph_raw)
-    stages["graph"] = [_stage_row(item, item["graph"], rank, "entity_graph_match_count") for rank, item in enumerate(graph_top, 1)]
-    candidates = {}
-    for item in bm25_top + vector_top + graph_top:
-        candidates[item["id"]] = {**candidates.get(item["id"], {}), **item}
-    index_by_id = {chunk["id"]: index for index, chunk in enumerate(chunks)}
-    fused = []
-    for item in candidates.values():
-        index = index_by_id[item["id"]]
-        active = []
-        if search_mode == "keyword" and item.get("bm25") is not None:
-            active.append((1.0, bm25_norm[index] or 0.0))
-        elif search_mode == "vector" and item.get("vector") is not None:
-            active.append((1.0, vector_norm[index] or 0.0))
-        elif search_mode == "hybrid" and item.get("bm25") is not None:
-            active.append((bm25_weight, bm25_norm[index] or 0.0))
-        if search_mode == "hybrid" and item.get("vector") is not None:
-            active.append((vector_weight, vector_norm[index] or 0.0))
-        if use_graph and item.get("graph") is not None:
-            active.append((graph_weight, graph_norm[index] or 0.0))
-        total = sum(weight for weight, _ in active)
-        if total:
-            score = sum(weight * value for weight, value in active) / total
-            fused.append((item, score))
-    fused.sort(key=lambda item: item[1], reverse=True)
-    fusion_all = [{**item, "fusion": score} for item, score in fused]
-    fusion_all = [item for item in fusion_all if item["fusion"] >= similarity_threshold]
-    fusion_top = fusion_all[:recall_top_k]
-    times["fusion"] = round((time.perf_counter() - mark) * 1000, 2)
-    stages["fusion"] = [_stage_row(item, item["fusion"], rank, "weighted_normalized_score") for rank, item in enumerate(fusion_top, 1)]
+            elif not embedding_enabled(embedding_config):
+                graph_status = "embedding_not_configured"
+            elif vector_index.get("status") != "indexed":
+                graph_status = "graph_vectors_unavailable"
+            else:
+                graph_vectors = db.get_knowledge_graph_embeddings(
+                    knowledge_base_id, graph.get("source_fingerprint", ""), active_embedding_model
+                )
+                if not graph_vectors:
+                    graph_status = "graph_vectors_missing"
+                else:
+                    graph_query_vector = query_vector
+                    if graph_query_vector is None:
+                        query_vectors = await embed_texts([query], embedding_config)
+                        graph_query_vector = query_vectors[0] if query_vectors else None
+                    if graph_query_vector is None:
+                        graph_status = "embedding_api_returned_no_vector"
+                    else:
+                        entity_hits = []
+                        triple_hits = []
+                        for record in graph_vectors:
+                            score = cosine(graph_query_vector, record["embedding"])
+                            hit = {**record, "score": score if score is not None else 0.0}
+                            (entity_hits if record["record_type"] == "entity" else triple_hits).append(hit)
+                        entity_hits.sort(key=lambda item: item["score"], reverse=True)
+                        triple_hits.sort(key=lambda item: item["score"], reverse=True)
+                        seed_weights: dict[str, float] = {}
+
+                        def add_seed(entity_id: str | None, score: float, weight: float) -> None:
+                            if entity_id:
+                                seed_weights[entity_id] = seed_weights.get(entity_id, 0.0) + max(float(score), 0.0) * weight
+
+                        for hit in entity_hits[:graph_entity_top_k]:
+                            add_seed(hit["record_id"], hit["score"], 1.0)
+                        edge_by_id = {str(edge.get("id")): edge for edge in graph.get("edges", []) if edge.get("id")}
+                        for hit in triple_hits[:graph_triple_top_k]:
+                            edge = edge_by_id.get(hit["record_id"], {})
+                            add_seed(edge.get("source"), hit["score"], 0.8)
+                            add_seed(edge.get("target"), hit["score"], 0.8)
+                        base_chunk_scores = {item["id"]: float(item.get("fusion") or 0.0) for item in fusion_base}
+                        for edge in graph.get("edges", []):
+                            if edge.get("type") == "MENTIONS" and edge.get("chunk_id") in base_chunk_scores:
+                                add_seed(edge.get("target"), base_chunk_scores[edge["chunk_id"]], 0.3)
+                        seed_total = sum(seed_weights.values())
+                        if seed_total <= 0:
+                            graph_status = "no_seed_hits"
+                        else:
+                            seed_weights = {entity_id: weight / seed_total for entity_id, weight in seed_weights.items()}
+                            subgraph = seed_subgraph(graph, seed_weights, graph_max_nodes)
+                            graph_scores = rank_chunks_by_ppr(
+                                subgraph, seed_weights, top_k=graph_top_k, damping=ppr_damping
+                            )
+                            chunks_by_id = {chunk["id"]: chunk for chunk in chunks}
+                            graph_top = [
+                                {**chunks_by_id[chunk_id], "graph": score}
+                                for chunk_id, score in graph_scores
+                                if chunk_id in chunks_by_id
+                            ]
+                            graph_status = "completed" if graph_top else "no_ppr_results"
+    stages["graph"] = [
+        _stage_row(item, item["graph"], rank, "yuxi_personalized_page_rank")
+        for rank, item in enumerate(graph_top, 1)
+    ]
+    fusion_top = fuse_chunk_rankings(fusion_base, graph_top, graph_weight) if graph_top else fusion_base
+    times["graph"] = round((time.perf_counter() - mark) * 1000, 2)
+    times["fusion"] = round(base_fusion_ms + (time.perf_counter() - mark) * 1000, 2)
+    if graph_top:
+        fusion_score_type = "yuxi_weighted_rrf_k60"
+    elif search_mode == "hybrid" and hybrid_available:
+        fusion_score_type = "milvus_weighted_ranker_v2.5.6"
+    elif search_mode == "vector":
+        fusion_score_type = "cosine_similarity"
+    else:
+        fusion_score_type = "bm25_raw"
+    stages["fusion"] = [
+        _stage_row(item, item["fusion"], rank, fusion_score_type)
+        for rank, item in enumerate(fusion_top, 1)
+    ]
 
     mark = time.perf_counter()
     rerank_status = "skipped"
@@ -301,7 +407,11 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
             "vector": round(chunk["vector"], 8) if chunk.get("vector") is not None else None,
             "fusion": round(chunk["fusion"], 8) if chunk.get("fusion") is not None else None,
             "rerank": round(chunk["rerank"], 8) if chunk.get("rerank") is not None else None,
+            "hybrid": round(chunk["hybrid"], 8) if chunk.get("hybrid") is not None else None,
+            "graph": round(chunk["graph"], 8) if chunk.get("graph") is not None else None,
         }
+        if chunk.get("distance") is not None:
+            scores["distance"] = round(chunk["distance"], 8)
         evidences.append(
             Evidence(
                 evidence_id=f"EV-{chunk['id']}",
@@ -318,7 +428,7 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
                 rerank_score=scores["rerank"],
                 source_spans=spans,
                 scores=scores,
-                metadata={**chunk.get("metadata", {}), "rank": rank},
+                metadata={**chunk.get("metadata", {}), "chunk_index": chunk["chunk_index"], "rank": rank},
             )
         )
     times["total"] = round((time.perf_counter() - started) * 1000, 2)
@@ -333,6 +443,7 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
         retrieval={
             "mode": mode,
             "search_mode": search_mode,
+            "include_distances": include_distances,
             "candidate_count": len(chunks),
             "recall_top_k": recall_top_k,
             "final_top_k": final_top_k,
@@ -341,6 +452,12 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
             "rerank_status": rerank_status,
             "graph_status": graph_status,
             "use_graph_retrieval": use_graph,
+            "graph_entity_top_k": graph_entity_top_k,
+            "graph_triple_top_k": graph_triple_top_k,
+            "graph_max_nodes": graph_max_nodes,
+            "graph_top_k": graph_top_k,
+            "graph_weight": graph_weight,
+            "ppr_damping": ppr_damping,
             "vector_skip_reason": vector_skip_reason,
             "vector_weight": vector_weight,
             "bm25_weight": bm25_weight,
@@ -399,7 +516,10 @@ async def retrieve_debug(req: RetrieveRequest) -> dict:
         model_config[section] = values
     config_snapshot = {
         "knowledge_base_id": knowledge_base.get("id") if knowledge_base else None,
-        "parser": kb_config.get("parser", {}),
+        "parser": {
+            **{key: value for key, value in kb_config.get("parser", {}).items() if key != "api_key"},
+            "api_key_set": bool(kb_config.get("parser", {}).get("api_key") or settings.mineru_api_key),
+        },
         "chunking": kb_config.get("chunking", {}),
         "retrieval": {
             **kb_config.get("retrieval", {}),
@@ -414,6 +534,12 @@ async def retrieve_debug(req: RetrieveRequest) -> dict:
             "similarity_threshold": response.retrieval.get("similarity_threshold"),
             "use_graph_retrieval": response.retrieval.get("use_graph_retrieval"),
             "graph_status": response.retrieval.get("graph_status"),
+            "graph_entity_top_k": response.retrieval.get("graph_entity_top_k"),
+            "graph_triple_top_k": response.retrieval.get("graph_triple_top_k"),
+            "graph_max_nodes": response.retrieval.get("graph_max_nodes"),
+            "graph_top_k": response.retrieval.get("graph_top_k"),
+            "graph_weight": response.retrieval.get("graph_weight"),
+            "ppr_damping": response.retrieval.get("ppr_damping"),
         },
         "models": model_config,
     }

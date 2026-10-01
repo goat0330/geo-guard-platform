@@ -1,10 +1,13 @@
-"""Rerank wire protocols adapted from Yuxi's model adapter."""
+"""SQLite-configured adapter over Yuxi's upstream reranker implementations."""
 
 import math
 
 import httpx
 
+from . import _upstream  # noqa: F401
 from ..config import settings
+from ..provider_store import resolve_runtime_config
+from yuxi.models.rerank import DashscopeReranker, OpenAIReranker, sigmoid
 
 
 def _value(config: dict | None, key: str, fallback):
@@ -13,32 +16,12 @@ def _value(config: dict | None, key: str, fallback):
 
 
 def enabled(config: dict | None = None) -> bool:
+    config = resolve_runtime_config(config, "rerank")
     return bool(
         _value(config, "base_url", settings.rerank_base_url)
         and _value(config, "api_key", settings.rerank_api_key)
         and _value(config, "model", settings.rerank_model)
     )
-
-
-def _payload(query: str, documents: list[str], protocol: str, model: str) -> dict:
-    if protocol.lower() == "dashscope":
-        return {
-            "model": model,
-            "input": {"query": query, "documents": documents},
-            "parameters": {"top_n": len(documents), "return_documents": False},
-        }
-    return {
-        "model": model,
-        "query": query,
-        "documents": documents,
-        "top_n": len(documents),
-    }
-
-
-def _results(data: dict, protocol: str) -> list[dict]:
-    if protocol.lower() == "dashscope":
-        return list(data.get("output", {}).get("results", []))
-    return list(data.get("results", []))
 
 
 def _scores_in_input_order(results: list[dict], document_count: int) -> list[float]:
@@ -65,17 +48,27 @@ def _scores_in_input_order(results: list[dict], document_count: int) -> list[flo
 
 
 async def rerank(query: str, documents: list[str], config: dict | None = None) -> list[float] | None:
+    config = resolve_runtime_config(config, "rerank")
     if not documents or not enabled(config):
         return None
-    base_url = _value(config, "base_url", settings.rerank_base_url)
-    api_key = _value(config, "api_key", settings.rerank_api_key)
-    model = _value(config, "model", settings.rerank_model)
     protocol = _value(config, "protocol", settings.rerank_protocol)
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=45) as client:
-        response = await client.post(base_url, headers=headers, json=_payload(query, documents, protocol, model))
-        response.raise_for_status()
-    return _scores_in_input_order(_results(response.json(), protocol), len(documents))
+    reranker_class = DashscopeReranker if protocol.lower() == "dashscope" else OpenAIReranker
+    reranker = reranker_class(
+        model_name=_value(config, "model", settings.rerank_model),
+        api_key=_value(config, "api_key", settings.rerank_api_key),
+        base_url=_value(config, "base_url", settings.rerank_base_url),
+        parameters=config.get("parameters") or {},
+    )
+    headers = {**reranker.headers, **(config.get("headers") or {})}
+    all_scores = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        for start in range(0, len(documents), 32):
+            batch = documents[start : start + 32]
+            payload = reranker._build_payload(query, batch, max_length=int(config.get("max_length", 512)))
+            response = await client.post(reranker.url, headers=headers, json=payload)
+            response.raise_for_status()
+            raw_scores = _scores_in_input_order(reranker._extract_results(response.json()), len(batch))
+            all_scores.extend(float(sigmoid(score)) for score in raw_scores)
+    if len(all_scores) != len(documents):
+        raise ValueError(f"Rerank returned {len(all_scores)} scores for {len(documents)} documents")
+    return all_scores

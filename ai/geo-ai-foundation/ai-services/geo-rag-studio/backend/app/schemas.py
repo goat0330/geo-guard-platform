@@ -32,6 +32,7 @@ class Evidence(BaseModel):
 class RetrieveRequest(BaseModel):
     query: str = Field(min_length=1)
     search_mode: Literal["hybrid", "keyword", "vector"] | None = None
+    include_distances: bool | None = None
     top_k: int | None = Field(default=None, ge=1, le=100)
     final_top_k: int | None = Field(default=None, ge=1, le=100)
     recall_top_k: int | None = Field(default=None, ge=1, le=200)
@@ -42,6 +43,12 @@ class RetrieveRequest(BaseModel):
     bm25_drop_ratio_search: float | None = Field(default=None, ge=0, le=1)
     similarity_threshold: float | None = Field(default=None, ge=0, le=1)
     use_graph_retrieval: bool | None = None
+    graph_entity_top_k: int | None = Field(default=None, ge=1, le=100)
+    graph_triple_top_k: int | None = Field(default=None, ge=1, le=100)
+    graph_max_nodes: int | None = Field(default=None, ge=100, le=50000)
+    graph_top_k: int | None = Field(default=None, ge=1, le=200)
+    graph_weight: float | None = Field(default=None, ge=0, le=5)
+    ppr_damping: float | None = Field(default=None, ge=0.1, le=0.99)
     filters: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -122,6 +129,7 @@ class DocumentMovePayload(BaseModel):
 
 class DocumentBatchPayload(BaseModel):
     document_ids: list[str] = Field(min_length=1, max_length=500)
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 class MindMapPayload(BaseModel):

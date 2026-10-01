@@ -202,19 +202,68 @@ async def parse_file(path: str, parser_options: dict | None = None) -> tuple[lis
     file_path = Path(path)
     suffix = file_path.suffix.lower()
     options = parser_options or {}
-    engine = str(options.get("engine") or "auto").strip().lower()
+    engine = str(options.get("ocr_engine") or options.get("engine") or "auto").strip().lower()
     api_uri = options.get("mineru_api_uri") or None
     api_key = options.get("api_key") or None
+    if engine == "mineru":
+        engine = "mineru_ocr"
+
+    async def run_yuxi_ocr(engine_id: str) -> tuple[list[dict], str]:
+        from .ocr_api import _build_processor
+        from .yuxi_port import _upstream  # noqa: F401
+        from yuxi.knowledge.parser.capabilities import get_parser_capability
+
+        capability = get_parser_capability(engine_id)
+        if suffix not in capability.supported_extensions:
+            raise ValueError(f"OCR 引擎 {engine_id} 不支持文件类型 {suffix}")
+        processor = _build_processor(engine_id)
+        if engine_id == "paddleocr_vl_1_6":
+            # Geo RAG stores source files locally; retain PaddleOCR's original image URLs
+            # instead of requiring Yuxi's MinIO image store.
+            processor._upload_markdown_image = lambda image_url, _image_path, _params: image_url
+        markdown = await asyncio.to_thread(processor.process_file, str(file_path), {})
+        blocks = parse_text(markdown or "")
+        if suffix in {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}:
+            for block in blocks:
+                block["page"] = 1
+        if not blocks:
+            raise ValueError(f"OCR 引擎 {engine_id} 未返回可索引文本")
+        return blocks, engine_id
+
     if suffix == ".pdf":
+        if engine in {"rapid_ocr", "pp_structure_v3_ocr", "deepseek_ocr", "paddleocr_vl_1_6", "paddleocr_pp_ocrv6"}:
+            return await run_yuxi_ocr(engine)
         if engine == "mineru_official" or (engine == "auto" and (api_key or settings.mineru_api_key)):
+            if engine == "mineru_official" and not api_key:
+                from .ocr_api import _effective_fields
+
+                api_key = _effective_fields("mineru_official_api_opts").get("api_key") or None
             blocks = await parse_pdf_mineru_official(str(file_path), api_key, api_uri)
             return blocks, "mineru-official"
-        if engine == "mineru" or (engine == "auto" and (api_uri or (settings.mineru_enabled and settings.mineru_api_uri))):
+        if engine == "mineru_ocr" or (engine == "auto" and (api_uri or (settings.mineru_enabled and settings.mineru_api_uri))):
+            if engine == "mineru_ocr" and not api_uri:
+                from .ocr_api import _effective_fields
+
+                api_uri = _effective_fields("mineru_ocr_host_opts").get("server_url") or None
             blocks = await parse_pdf_mineru(str(file_path), api_uri)
             return blocks, "mineru-file_parse"
+        if engine not in {"auto", "disable", "pymupdf-layout"}:
+            raise ValueError(f"不支持的 PDF 解析引擎: {engine}")
         return parse_pdf_layout(str(file_path)), "pymupdf-layout"
     if suffix in {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}:
-        selected_engine = "mineru_official" if engine == "mineru_official" or (engine == "auto" and (api_key or settings.mineru_api_key)) else "mineru" if engine == "mineru" or (engine == "auto" and (api_uri or (settings.mineru_enabled and settings.mineru_api_uri))) else ""
+        if engine == "disable":
+            raise ValueError("图片解析不能禁用 OCR")
+        if engine in {"rapid_ocr", "pp_structure_v3_ocr", "deepseek_ocr", "paddleocr_vl_1_6", "paddleocr_pp_ocrv6"}:
+            return await run_yuxi_ocr(engine)
+        if engine == "mineru_official" and not api_key:
+            from .ocr_api import _effective_fields
+
+            api_key = _effective_fields("mineru_official_api_opts").get("api_key") or None
+        if engine == "mineru_ocr" and not api_uri:
+            from .ocr_api import _effective_fields
+
+            api_uri = _effective_fields("mineru_ocr_host_opts").get("server_url") or None
+        selected_engine = "mineru_official" if engine == "mineru_official" or (engine == "auto" and (api_key or settings.mineru_api_key)) else "mineru_ocr" if engine in {"mineru", "mineru_ocr"} or (engine == "auto" and (api_uri or (settings.mineru_enabled and settings.mineru_api_uri))) else ""
         if not selected_engine:
             raise ValueError("图片文件需要可用的 OCR 服务，请配置 MinerU API 或选择已配置的 OCR 引擎")
         parse_path = file_path
@@ -239,6 +288,8 @@ async def parse_file(path: str, parser_options: dict | None = None) -> tuple[lis
                 temp_path.unlink(missing_ok=True)
     if suffix in {".docx", ".pptx"} and engine == "mineru_official":
         return await parse_pdf_mineru_official(str(file_path), api_key, api_uri), "mineru-official"
+    if engine not in {"auto", "disable", "pymupdf-layout"}:
+        raise ValueError(f"解析器 {engine} 不支持文件类型 {suffix}")
     return await asyncio.to_thread(_parse_local_document, file_path, options)
 
 

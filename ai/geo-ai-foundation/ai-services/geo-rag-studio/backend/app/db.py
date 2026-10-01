@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS knowledge_views (
   created_at TEXT NOT NULL,
   UNIQUE(knowledge_base_id, view_type, source_id)
 );
+CREATE TABLE IF NOT EXISTS knowledge_graph_embeddings (
+  knowledge_base_id TEXT NOT NULL,
+  source_fingerprint TEXT NOT NULL,
+  embedding_model TEXT NOT NULL,
+  record_type TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  embedding_json TEXT NOT NULL,
+  PRIMARY KEY(knowledge_base_id, embedding_model, record_type, record_id)
+);
 CREATE TABLE IF NOT EXISTS evaluation_datasets (
   id TEXT PRIMARY KEY,
   knowledge_base_id TEXT NOT NULL,
@@ -62,6 +72,21 @@ CREATE TABLE IF NOT EXISTS evaluation_runs (
   dataset_id TEXT,
   result_json TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS model_providers (
+  provider_id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS model_provider_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS system_options (
+  key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sample_questions (
   id TEXT PRIMARY KEY,
@@ -175,6 +200,12 @@ def default_knowledge_base_config() -> dict:
             "bm25_drop_ratio_search": 0.0,
             "use_reranker": False,
             "use_graph_retrieval": False,
+            "graph_entity_top_k": 10,
+            "graph_triple_top_k": 10,
+            "graph_max_nodes": 10000,
+            "graph_top_k": 20,
+            "graph_weight": 1.0,
+            "ppr_damping": 0.85,
         },
         "embedding": {"base_url": "", "model": "", "dimensions": None, "batch_size": 32},
         "reranker": {"base_url": "", "model": "", "protocol": "openai"},
@@ -357,6 +388,50 @@ def get_knowledge_view(knowledge_base_id: str, view_type: str, source_id: str = 
     return _knowledge_view(row) if row else None
 
 
+def replace_knowledge_graph_embeddings(
+    knowledge_base_id: str, source_fingerprint: str, embedding_model: str, records: list[dict]
+) -> int:
+    with connect() as connection:
+        connection.execute("DELETE FROM knowledge_graph_embeddings WHERE knowledge_base_id=?", (knowledge_base_id,))
+        connection.executemany(
+            "INSERT INTO knowledge_graph_embeddings(knowledge_base_id, source_fingerprint, embedding_model, "
+            "record_type, record_id, content, embedding_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    knowledge_base_id,
+                    source_fingerprint,
+                    embedding_model,
+                    record["record_type"],
+                    record["record_id"],
+                    record["content"],
+                    json.dumps(record["embedding"], ensure_ascii=False),
+                )
+                for record in records
+            ],
+        )
+    return len(records)
+
+
+def get_knowledge_graph_embeddings(
+    knowledge_base_id: str, source_fingerprint: str, embedding_model: str
+) -> list[dict]:
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT record_type, record_id, content, embedding_json FROM knowledge_graph_embeddings "
+            "WHERE knowledge_base_id=? AND source_fingerprint=? AND embedding_model=?",
+            (knowledge_base_id, source_fingerprint, embedding_model),
+        ).fetchall()
+    return [
+        {
+            "record_type": row["record_type"],
+            "record_id": row["record_id"],
+            "content": row["content"],
+            "embedding": json.loads(row["embedding_json"]),
+        }
+        for row in rows
+    ]
+
+
 def list_knowledge_views(knowledge_base_id: str, view_type: str) -> list[dict]:
     with connect() as connection:
         rows = connection.execute(
@@ -372,7 +447,12 @@ def delete_knowledge_view(knowledge_base_id: str, view_type: str, source_id: str
             "DELETE FROM knowledge_views WHERE knowledge_base_id=? AND view_type=? AND source_id=?",
             (knowledge_base_id, view_type, source_id),
         )
-    return cursor.rowcount > 0
+        vectors_deleted = 0
+        if view_type == "graph" and not source_id:
+            vectors_deleted = connection.execute(
+                "DELETE FROM knowledge_graph_embeddings WHERE knowledge_base_id=?", (knowledge_base_id,)
+            ).rowcount
+    return cursor.rowcount > 0 or vectors_deleted > 0
 
 
 def _knowledge_view(row):
@@ -723,3 +803,18 @@ def _chunk(row, include_embedding=True):
         "document_status": row["status"] if "status" in keys else None,
         "knowledge_base_id": row["knowledge_base_id"] if "knowledge_base_id" in keys else None,
     }
+
+
+def get_system_option(key: str, default=None):
+    with connect() as connection:
+        row = connection.execute("SELECT value_json FROM system_options WHERE key=?", (key,)).fetchone()
+    return json.loads(row["value_json"]) if row else default
+
+
+def set_system_option(key: str, value) -> None:
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO system_options(key,value_json,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+            (key, json.dumps(value, ensure_ascii=False), now_iso()),
+        )

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app import main as rag
 from app.config import settings
 from app.main import app
 
@@ -131,6 +132,10 @@ def test_yuxi_local_file_pipeline_and_retrieval_use_pdf(tmp_path, monkeypatch, p
     assert results.status_code == 200, results.text
     assert results.json()
     assert all(item["metadata"]["file_id"] == document_id for item in results.json())
+    result = results.json()[0]
+    assert result["metadata"]["chunk_index"] >= 0
+    assert result["score"] == result["fusion_score"] == result["bm25_score"]
+    assert result["distance"] == result["bm25_score"]
 
     stats = client.post(f"/api/knowledge/databases/{kb_id}/stats/repair", json={})
     assert stats.status_code == 200
@@ -296,3 +301,102 @@ def test_yuxi_zip_folder_upload_indexes_supported_files_and_rejects_zip_slip(tmp
     )
     assert rejected.status_code == 422
     assert "不安全的文件路径" in rejected.json()["detail"]
+
+
+def test_yuxi_knowledge_dashboard_stats_aggregates_local_database_and_files(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    created = client.post(
+        "/api/knowledge/databases",
+        json={"database_name": "知识统计验收", "kb_type": "local", "additional_params": {}},
+    )
+    assert created.status_code == 200, created.text
+    kb_id = created.json()["kb_id"]
+
+    content = "地质灾害预警响应需要核查监测数据与巡查记录。".encode()
+    uploaded = client.post(
+        "/api/knowledge/files/upload",
+        params={"kb_id": kb_id},
+        files={"file": ("应急预案.txt", content, "text/plain")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    added = client.post(
+        f"/api/knowledge/databases/{kb_id}/documents/add",
+        json={"items": [uploaded.json()["file_path"]]},
+    )
+    assert added.status_code == 200, added.text
+    assert added.json()["status"] == "success"
+
+    response = client.get("/api/dashboard/stats/knowledge")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "total_databases": 1,
+        "total_files": 1,
+        "total_nodes": 0,
+        "total_storage_size": len(content),
+        "databases_by_type": {"local": 1},
+        "file_type_distribution": {"文本文件": 1},
+    }
+
+
+def test_yuxi_query_preserves_scores_chunk_metadata_and_optional_distance(monkeypatch):
+    captured = {}
+
+    async def fake_retrieve(request):
+        captured["request"] = request
+        return {
+            "retrieval": {"search_mode": "hybrid", "use_graph_retrieval": True},
+            "evidences": [
+                {
+                    "evidence_id": "EV-chunk-1",
+                    "document_id": "file-1",
+                    "chunk_id": "chunk-1",
+                    "file_name": "预案.pdf",
+                    "page": 2,
+                    "bbox": [10, 20, 80, 90],
+                    "text": "坡体裂缝扩大时应立即复核。",
+                    "bm25_score": 0.0,
+                    "vector_score": 0.42,
+                    "fusion_score": 0.0,
+                    "rerank_score": 0.0,
+                    "scores": {
+                        "bm25": 0.0,
+                        "vector": 0.42,
+                        "fusion": 0.0,
+                        "rerank": 0.0,
+                        "hybrid": 0.67,
+                        "graph": 0.03,
+                        "distance": 0.67,
+                    },
+                    "metadata": {"chunk_index": 7, "custom": "preserved"},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(rag, "retrieve_api", fake_retrieve)
+    client = TestClient(app)
+    response = client.post(
+        "/api/knowledge/databases/kb-test/query-test",
+        json={"query": "坡体裂缝", "meta": {"top_k": 3, "include_distances": False}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["request"].include_distances is False
+    item = response.json()[0]
+    assert item["score"] == 0.0
+    assert item["rerank_score"] == 0.0
+    assert item["bm25_score"] == 0.0
+    assert item["vector_score"] == 0.42
+    assert item["hybrid_score"] == 0.67
+    assert item["graph_score"] == 0.03
+    assert item["fusion_score"] == 0.0
+    assert "distance" not in item
+    assert item["metadata"] == {
+        "chunk_index": 7,
+        "custom": "preserved",
+        "file_id": "file-1",
+        "source": "预案.pdf",
+        "chunk_id": "chunk-1",
+        "page": 2,
+        "bbox": [10, 20, 80, 90],
+    }

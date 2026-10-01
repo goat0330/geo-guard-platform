@@ -13,7 +13,7 @@
 **/.venv/
 **/target/
 **/dist/
-**/data/
+ai/geo-ai-foundation/ai-services/geo-rag-studio/data/
 !frontend/geo-guard-fe/src/assets/data/
 !frontend/geo-guard-fe/src/assets/data/chongqing-boundary.json
 **/__pycache__/
