@@ -68,8 +68,10 @@ def cosine(left: list[float] | None, right: list[float] | None) -> float | None:
 
 def _stage_row(chunk: dict, score: float, rank: int, stage_score: str) -> dict:
     spans = chunk.get("source_spans", [])
-    primary_span = next((span for span in spans if span.get("page") is not None), {})
-    bbox_span = next((span for span in spans if span.get("bbox")), primary_span)
+    primary_span = next(
+        (span for span in spans if span.get("page") is not None and span.get("bbox")),
+        next((span for span in spans if span.get("page") is not None), {}),
+    )
     return {
         "rank": rank,
         "evidence_id": f"EV-{chunk['id']}",
@@ -77,7 +79,7 @@ def _stage_row(chunk: dict, score: float, rank: int, stage_score: str) -> dict:
         "document_id": chunk["document_id"],
         "file_name": chunk.get("file_name"),
         "page": primary_span.get("page"),
-        "bbox": bbox_span.get("bbox"),
+        "bbox": primary_span.get("bbox"),
         "text": chunk["text"],
         "score": round(score, 8),
         "score_type": stage_score,
@@ -142,16 +144,25 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
     retrieval_config = kb_config.get("retrieval", {})
     embedding_config = kb_config.get("embedding", {})
     reranker_config = kb_config.get("reranker", {})
+    reranker_model = req.reranker_model or retrieval_config.get("reranker_model")
+    if reranker_model:
+        # Yuxi query options select a provider model per retrieval request.
+        # Resolve its endpoint and credential from the local provider registry.
+        reranker_config = {"model": reranker_model}
     search_mode = req.search_mode or retrieval_config.get("search_mode", "hybrid")
     include_distances = req.include_distances if req.include_distances is not None else bool(retrieval_config.get("include_distances", True))
     use_reranker = req.use_reranker if req.use_reranker is not None else bool(retrieval_config.get("use_reranker", False))
     final_top_k = req.final_top_k or req.top_k or retrieval_config.get("final_top_k") or settings.default_final_top_k
     requested_recall = req.recall_top_k or retrieval_config.get("recall_top_k")
-    recall_top_k = max(final_top_k, requested_recall or (settings.default_recall_top_k if use_reranker else final_top_k))
+    use_graph = req.use_graph_retrieval if req.use_graph_retrieval is not None else bool(retrieval_config.get("use_graph_retrieval", False))
+    recall_top_k = (
+        max(final_top_k, requested_recall or settings.default_recall_top_k)
+        if use_reranker or use_graph
+        else final_top_k
+    )
     bm25_top_k = max(final_top_k, req.bm25_top_k or retrieval_config.get("bm25_top_k", 50))
     bm25_drop_ratio_search = req.bm25_drop_ratio_search if req.bm25_drop_ratio_search is not None else retrieval_config.get("bm25_drop_ratio_search", 0.0)
     similarity_threshold = req.similarity_threshold if req.similarity_threshold is not None else retrieval_config.get("similarity_threshold", 0.0)
-    use_graph = req.use_graph_retrieval if req.use_graph_retrieval is not None else bool(retrieval_config.get("use_graph_retrieval", False))
     graph_entity_top_k = req.graph_entity_top_k or int(retrieval_config.get("graph_entity_top_k", 10))
     graph_triple_top_k = req.graph_triple_top_k or int(retrieval_config.get("graph_triple_top_k", 10))
     graph_max_nodes = req.graph_max_nodes or int(retrieval_config.get("graph_max_nodes", 10000))
@@ -159,7 +170,7 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
     graph_weight = float(req.graph_weight if req.graph_weight is not None else retrieval_config.get("graph_weight", 1.0))
     ppr_damping = float(req.ppr_damping if req.ppr_damping is not None else retrieval_config.get("ppr_damping", 0.85))
     if use_reranker and not rerank_enabled(reranker_config):
-        raise ProviderUnavailable("Reranker requested but RERANK_BASE_URL, RERANK_API_KEY, and RERANK_MODEL are not configured")
+        raise ProviderUnavailable("Reranker requested but its provider endpoint, API key, or model is not configured")
     if search_mode == "vector" and not embedding_enabled(embedding_config):
         raise ProviderUnavailable("Vector retrieval requires an Embedding API configuration")
 
@@ -399,8 +410,10 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
     evidences = []
     for rank, chunk in enumerate(selected, start=1):
         spans = [SourceSpan.model_validate(span) for span in chunk.get("source_spans", [])]
-        primary_span = next((span for span in spans if span.page is not None), None)
-        bbox_span = next((span for span in spans if span.bbox), primary_span)
+        primary_span = next(
+            (span for span in spans if span.page is not None and span.bbox),
+            next((span for span in spans if span.page is not None), None),
+        )
         primary_page = primary_span.page if primary_span else None
         scores = {
             "bm25": round(chunk["bm25"], 8) if chunk.get("bm25") is not None else None,
@@ -421,7 +434,7 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
                 page=primary_page,
                 text=chunk["text"],
                 token_count=chunk["token_count"],
-                bbox=bbox_span.bbox if bbox_span else None,
+                bbox=primary_span.bbox if primary_span else None,
                 bm25_score=scores["bm25"],
                 vector_score=scores["vector"],
                 fusion_score=scores["fusion"],
@@ -449,6 +462,7 @@ async def _retrieve(req: RetrieveRequest) -> tuple[RetrieveResponse, dict]:
             "final_top_k": final_top_k,
             "use_reranker": use_reranker,
             "reranker": (reranker_config or {}).get("model") or settings.rerank_model or None,
+            "reranker_enabled": rerank_enabled(reranker_config),
             "rerank_status": rerank_status,
             "graph_status": graph_status,
             "use_graph_retrieval": use_graph,
@@ -511,8 +525,9 @@ async def retrieve_debug(req: RetrieveRequest) -> dict:
             values.setdefault("provider", "openai-compatible")
             values["model"] = values.get("model") or settings.embedding_model or None
         else:
-            values["model"] = values.get("model") or settings.rerank_model or None
+            values["model"] = response.retrieval.get("reranker") or values.get("model") or settings.rerank_model or None
             values["protocol"] = values.get("protocol") or settings.rerank_protocol
+            values["enabled"] = response.retrieval.get("reranker_enabled", values["enabled"])
         model_config[section] = values
     config_snapshot = {
         "knowledge_base_id": knowledge_base.get("id") if knowledge_base else None,
@@ -527,6 +542,7 @@ async def retrieve_debug(req: RetrieveRequest) -> dict:
             "recall_top_k": response.retrieval.get("recall_top_k"),
             "final_top_k": response.retrieval.get("final_top_k"),
             "use_reranker": use_reranker,
+            "reranker_model": response.retrieval.get("reranker"),
             "vector_weight": response.retrieval.get("vector_weight"),
             "bm25_weight": response.retrieval.get("bm25_weight"),
             "bm25_top_k": response.retrieval.get("bm25_top_k"),

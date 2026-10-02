@@ -43,7 +43,7 @@ def test_yuxi_external_database_routes_use_indexed_local_content(tmp_path, monke
 
     retrieved = client.post(
         f"/api/knowledge/databases/external/{kb_id}/retrieve",
-        json={"query": "slope cracks rainfall", "options": {"top_k": 3}},
+        json={"query": "slope cracks rainfall", "options": {"search_mode": "keyword", "top_k": 3}},
     )
     assert retrieved.status_code == 200, retrieved.text
     result = retrieved.json()["results"][0]

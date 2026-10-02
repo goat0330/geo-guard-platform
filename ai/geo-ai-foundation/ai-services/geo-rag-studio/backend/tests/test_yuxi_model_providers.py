@@ -33,6 +33,12 @@ def test_yuxi_builtin_embedding_selector_resolves_upstream_spec(tmp_path, monkey
     assert runtime["dimensions"] == 1024
     assert runtime["api_key"] == ""
 
+    reranker_spec = "siliconflow-cn:Pro/BAAI/bge-reranker-v2-m3"
+    reranker = resolve_runtime_config({"model": reranker_spec}, "rerank")
+    assert reranker["model"] == "Pro/BAAI/bge-reranker-v2-m3"
+    assert reranker["base_url"] == "https://api.siliconflow.cn/v1/rerank"
+    assert reranker["api_key"] == ""
+
     status = client.get("/api/system/model-providers/models/status", params={"spec": spec})
     assert status.status_code == 200
     assert status.json()["status"] == "error"

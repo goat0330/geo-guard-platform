@@ -37,6 +37,7 @@ class RetrieveRequest(BaseModel):
     final_top_k: int | None = Field(default=None, ge=1, le=100)
     recall_top_k: int | None = Field(default=None, ge=1, le=200)
     use_reranker: bool | None = None
+    reranker_model: str | None = Field(default=None, max_length=200)
     vector_weight: float | None = Field(default=None, ge=0, le=1)
     bm25_weight: float | None = Field(default=None, ge=0, le=1)
     bm25_top_k: int | None = Field(default=None, ge=1, le=200)

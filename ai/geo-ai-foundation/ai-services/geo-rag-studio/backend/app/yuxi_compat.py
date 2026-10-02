@@ -13,6 +13,7 @@ import stat
 import tempfile
 import uuid
 import zipfile
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlsplit
@@ -28,10 +29,11 @@ from .config import settings
 from .schemas import DocumentBatchPayload, DocumentMovePayload, EmbeddingTestRequest, EvaluationRunPayload, GraphConfigPayload, KnowledgeBasePayload, KnowledgeBaseUpdatePayload, MindMapPayload, RerankerTestRequest, RetrieveRequest
 from .yuxi_port.chunk_presets import get_options
 from .parser import parse_file_markdown
+from yuxi.knowledge.utils.kb_utils import calculate_content_hash
 
 router = APIRouter()
 STAGE_URI = "local-stage://"
-SHARE_CONFIG = {"version": 2, "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []}, "manage_scope": None}
+DEFAULT_SHARE_CONFIG = {"version": 2, "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []}, "manage_scope": None}
 
 
 def _yuxi_document(document: dict) -> dict:
@@ -59,9 +61,12 @@ def _yuxi_document(document: dict) -> dict:
         "embedding_chunk_count": document.get("embedding_chunk_count", 0),
         "error_message": document.get("error_message"),
         "created_at": document.get("created_at"),
+        "updated_at": document.get("updated_at"),
         "folder_id": document.get("folder_id"),
         "parent_id": document.get("folder_id"),
         "is_folder": False,
+        "has_original_file": file_path.is_file() and file_path.resolve().is_relative_to(Path(settings.rag_upload_dir).resolve()),
+        "has_parsed_markdown": bool(db.get_blocks(document["id"])),
         "metadata": metadata,
     }
 
@@ -130,7 +135,7 @@ def _yuxi_knowledge_base(knowledge_base: dict, include_files: bool = False) -> d
         "kb_id": public["id"],
         "embedding_model_spec": embedding.get("model") or "",
         "additional_params": additional_params,
-        "share_config": SHARE_CONFIG,
+        "share_config": config.get("share_config") or DEFAULT_SHARE_CONFIG,
         "can_manage": True,
         "row_count": public.get("document_count", 0),
         "stats": _kb_stats(public["id"]),
@@ -182,6 +187,11 @@ def _config_from_yuxi(payload: dict, current: dict | None = None) -> dict:
         if source in additional:
             notion[target] = additional[source]
     config["notion"] = notion
+    if "share_config" in payload:
+        share_config = payload["share_config"]
+        if not isinstance(share_config, dict):
+            raise HTTPException(status_code=422, detail="share_config 必须是对象")
+        config["share_config"] = share_config
     return rag._merge_config(config, {})
 
 
@@ -703,21 +713,32 @@ async def yuxi_list_documents(
     parent_id: str | None = None,
     recursive: bool = False,
     path_prefix: str = "",
+    files_only: bool = False,
 ):
     rag._knowledge_base_or_404(knowledge_base_id)
+    folders = db.list_folders(knowledge_base_id)
+    if parent_id and not any(item["id"] == parent_id for item in folders):
+        raise HTTPException(status_code=404, detail="父文件夹不存在")
+    # Yuxi only searches all directory levels when a status filter is active.
+    recursive = recursive and status != "all"
     documents = db.list_documents(knowledge_base_id)
     if status != "all":
-        documents = [item for item in documents if item.get("status") == status]
-    if parent_id:
+        selected_statuses = {"failed", "error_indexing"} if status == "error_indexing" else {status}
+        documents = [item for item in documents if item.get("status") in selected_statuses]
+    if parent_id and not recursive:
         documents = [item for item in documents if item.get("folder_id") == parent_id]
+    elif not recursive:
+        documents = [item for item in documents if item.get("folder_id") is None]
     if path_prefix:
         documents = [item for item in documents if str((item.get("metadata") or {}).get("relative_path", "")).startswith(path_prefix)]
-    folders = db.list_folders(knowledge_base_id)
-    if parent_id is not None:
+    if files_only or status != "all":
+        folders = []
+    elif parent_id is not None:
         folders = [item for item in folders if item.get("parent_id") == parent_id]
     elif not recursive:
         folders = [item for item in folders if item.get("parent_id") is None]
     combined = [_yuxi_folder(item) for item in folders] + [_yuxi_document(item) for item in documents]
+    combined.sort(key=lambda item: (not item["is_folder"], item["filename"].casefold()))
     total = len(combined)
     page = max(1, page)
     page_size = max(1, min(page_size, 500))
@@ -727,13 +748,30 @@ async def yuxi_list_documents(
 
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}/documents/search")
-async def yuxi_search_documents(knowledge_base_id: str, q: str = "", page: int = 1, page_size: int = 100):
-    result = await yuxi_list_documents(knowledge_base_id, page=page, page_size=page_size)
-    query = q.casefold().strip()
-    if query:
-        result["items"] = [item for item in result["items"] if query in item.get("filename", "").casefold()]
-    result["total"] = len(result["items"])
-    return result
+async def yuxi_search_documents(
+    knowledge_base_id: str,
+    query: str = "",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+):
+    knowledge_base = rag._knowledge_base_or_404(knowledge_base_id)
+    if knowledge_base["kb_type"] != "local":
+        raise HTTPException(status_code=400, detail="连接型知识库仅支持检索，不支持文档搜索")
+    normalized_query = query.strip()
+    if not normalized_query:
+        return {"files": [], "total": 0, "offset": 0, "limit": limit, "has_more": False}
+    documents, total = db.search_documents(knowledge_base_id, normalized_query, offset, limit)
+    files = []
+    for document in documents:
+        item = _yuxi_document(document)
+        files.append({
+            "kb_id": knowledge_base_id,
+            "kb_name": knowledge_base["name"],
+            **{key: item.get(key) for key in (
+                "file_id", "filename", "file_type", "status", "created_at", "updated_at", "file_size", "parent_id"
+            )},
+        })
+    return {"files": files, "total": total, "offset": offset, "limit": limit, "has_more": offset + limit < total}
 
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}/documents/exists")
@@ -766,6 +804,7 @@ async def yuxi_move_document(knowledge_base_id: str, document_id: str, payload: 
 
 
 def _staging_paths(stage_id: str) -> tuple[Path, Path]:
+    stage_id = stage_id.split("/", 1)[0]
     if not re.fullmatch(r"[a-f0-9]{32}", stage_id):
         raise HTTPException(status_code=400, detail="上传临时标识无效")
     root = (Path(settings.rag_upload_dir) / ".yuxi_staging").resolve()
@@ -780,10 +819,17 @@ def _stage_file(
     source_url: str | None = None,
 ) -> dict:
     stage_id = uuid.uuid4().hex
+    if not mime_type or mime_type == "application/octet-stream":
+        mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
     data_path, metadata_path = _staging_paths(stage_id)
     data_path.parent.mkdir(parents=True, exist_ok=True)
     data_path.write_bytes(content)
     digest = hashlib.sha256(content).hexdigest()
+    same_name_files = [
+        {**_yuxi_document(document), "content_hash": document.get("metadata", {}).get("sha256") or ""}
+        for document in (db.list_documents(knowledge_base_id) if knowledge_base_id else [])
+        if document["file_name"].casefold() == file_name.casefold()
+    ]
     metadata_path.write_text(
         json.dumps(
             {
@@ -804,8 +850,8 @@ def _stage_file(
         "content_hash": digest,
         "size": len(content),
         "status": "uploaded",
-        "has_same_name": False,
-        "same_name_files": [],
+        "has_same_name": bool(same_name_files),
+        "same_name_files": same_name_files,
     }
 
 
@@ -865,6 +911,9 @@ async def yuxi_upload_file(file: UploadFile = File(...), kb_id: str | None = Non
         knowledge_base = rag._knowledge_base_or_404(kb_id)
         if knowledge_base["kb_type"] != "local":
             raise HTTPException(status_code=400, detail="Dify/Notion 知识库为只读连接器")
+        content_hash = await calculate_content_hash(content)
+        if any(document.get("metadata", {}).get("sha256") == content_hash for document in db.list_documents(kb_id)):
+            raise HTTPException(status_code=409, detail="数据库中已经存在了相同内容文件，File with the same content already exists in this database")
     return _stage_file(content, file_name, file.content_type, kb_id)
 
 
@@ -1049,9 +1098,188 @@ async def yuxi_fetch_url(payload: dict = Body(...)):
     return _stage_file(content, Path(file_name).name, content_type, str(kb_id) if kb_id else None, raw_url)
 
 
+def _workspace_target(path: str) -> tuple[Path, str]:
+    raw_path = str(path or "/").replace("\\", "/")
+    parts = [part for part in raw_path.split("/") if part]
+    if any(part in {".", ".."} or ":" in part or "\x00" in part for part in parts):
+        raise HTTPException(status_code=403, detail="工作区路径无效")
+
+    root = Path(settings.rag_workspace_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    target = root
+    for part in parts:
+        target = target / part
+        try:
+            info = target.lstat()
+        except FileNotFoundError:
+            continue
+        attributes = getattr(info, "st_file_attributes", 0)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(info.st_mode) or attributes & reparse_flag:
+            raise HTTPException(status_code=403, detail="工作区不允许符号链接或重解析点")
+
+    resolved = target.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise HTTPException(status_code=403, detail="工作区路径超出允许目录")
+    return resolved, "/" + "/".join(parts)
+
+
+def _workspace_entry(path: Path, virtual_path: str) -> dict:
+    info = path.stat()
+    is_dir = stat.S_ISDIR(info.st_mode)
+    display_path = virtual_path.rstrip("/") + ("/" if is_dir and virtual_path != "/" else "")
+    return {
+        "path": display_path or "/",
+        "virtual_path": f"local-workspace:{display_path or '/'}",
+        "name": path.name or "工作区",
+        "is_dir": is_dir,
+        "size": 0 if is_dir else info.st_size,
+        "modified_at": datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat(),
+    }
+
+
+def _workspace_children(path: Path, virtual_path: str, files_only: bool) -> list[dict]:
+    entries = []
+    for child in path.iterdir():
+        try:
+            info = child.lstat()
+            attributes = getattr(info, "st_file_attributes", 0)
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            if stat.S_ISLNK(info.st_mode) or attributes & reparse_flag:
+                continue
+            is_dir = stat.S_ISDIR(info.st_mode)
+            if files_only and is_dir:
+                continue
+            child_virtual_path = f"{virtual_path.rstrip('/')}/{child.name}"
+            entries.append(_workspace_entry(child, child_virtual_path))
+        except OSError:
+            continue
+    return sorted(entries, key=lambda entry: (not entry["is_dir"], entry["name"].casefold()))
+
+
+@router.get("/api/workspace/tree")
+async def yuxi_workspace_tree(
+    path: str = Query("/"),
+    recursive: bool = False,
+    files_only: bool = False,
+    include_unbound_project_dirs: bool = False,
+):
+    del include_unbound_project_dirs  # Geo local workspace has no Yuxi project binding layer.
+    target, virtual_path = _workspace_target(path)
+    if not target.exists():
+        return {"entries": []}
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail="当前路径不是目录")
+
+    if not recursive:
+        return {"entries": _workspace_children(target, virtual_path, files_only)}
+
+    entries = []
+    pending = [(target, virtual_path)]
+    pending_index = 0
+    while pending_index < len(pending) and len(entries) < 5000:
+        current, current_virtual_path = pending[pending_index]
+        pending_index += 1
+        children = _workspace_children(current, current_virtual_path, False)
+        visible_children = [entry for entry in children if not files_only or not entry["is_dir"]]
+        entries.extend(visible_children[: 5000 - len(entries)])
+        pending.extend(
+            (current / entry["name"], entry["path"].rstrip("/"))
+            for entry in children
+            if entry["is_dir"]
+        )
+    return {"entries": entries}
+
+
+@router.post("/api/workspace/directory")
+async def yuxi_create_workspace_directory(payload: dict = Body(...)):
+    name = str(payload.get("name") or "").strip()
+    if not name or name in {".", ".."} or any(char in name for char in ("/", "\\", ":", "\x00")):
+        raise HTTPException(status_code=422, detail="文件夹名称无效")
+    parent, parent_virtual_path = _workspace_target(str(payload.get("parent_path") or "/"))
+    if not parent.exists():
+        raise HTTPException(status_code=404, detail="目标目录不存在")
+    if not parent.is_dir():
+        raise HTTPException(status_code=400, detail="目标路径不是目录")
+    child = parent / name
+    try:
+        child.mkdir()
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail="同名文件或文件夹已存在") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail="无法创建文件夹") from exc
+    virtual_path = f"{parent_virtual_path.rstrip('/')}/{name}"
+    return {"success": True, "entry": _workspace_entry(child, virtual_path)}
+
+
 @router.post("/api/knowledge/files/import-workspace")
 async def yuxi_import_workspace_files(payload: dict = Body(...)):
-    raise HTTPException(status_code=501, detail="Yuxi 个人工作区未迁移；请从本机上传文件到知识库")
+    knowledge_base_id = str(payload.get("kb_id") or "").strip()
+    paths = payload.get("paths") or []
+    if not knowledge_base_id:
+        raise HTTPException(status_code=400, detail="kb_id is required")
+    if not isinstance(paths, list) or not paths:
+        raise HTTPException(status_code=400, detail="请选择至少一个工作区文件")
+    if len(paths) > 50:
+        raise HTTPException(status_code=400, detail="一次最多导入 50 个文件")
+    knowledge_base = rag._knowledge_base_or_404(knowledge_base_id)
+    if knowledge_base["kb_type"] != "local":
+        raise HTTPException(status_code=400, detail="只读连接器不能导入本地文件")
+
+    known_documents = db.list_documents(knowledge_base_id)
+    known_hashes = {
+        document.get("metadata", {}).get("sha256")
+        for document in known_documents
+        if document.get("metadata", {}).get("sha256")
+    }
+    imported_hashes = set()
+    results = []
+    for path in paths:
+        source, virtual_path = _workspace_target(str(path))
+        if not source.exists():
+            raise HTTPException(status_code=404, detail="工作区文件不存在")
+        if not source.is_file():
+            raise HTTPException(status_code=400, detail="只能导入文件")
+        file_name = source.name.lower()
+        if Path(file_name).suffix.lower() not in rag.ALLOWED_UPLOADS:
+            raise HTTPException(status_code=415, detail=f"不支持的文件类型：{Path(file_name).suffix or 'unknown'}")
+        if source.stat().st_size > rag.MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="工作区文件超过 100 MB")
+        content = source.read_bytes()
+        if not content:
+            raise HTTPException(status_code=422, detail="工作区文件为空")
+        if len(content) > rag.MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="工作区文件超过 100 MB")
+        digest = hashlib.sha256(content).hexdigest()
+        if digest in known_hashes or digest in imported_hashes:
+            raise HTTPException(status_code=409, detail=f"知识库中已经存在相同内容文件：{file_name}")
+        imported_hashes.add(digest)
+
+        staged = _stage_file(
+            content,
+            file_name,
+            mimetypes.guess_type(file_name)[0],
+            knowledge_base_id,
+        )
+        same_name_files = [
+            {"file_id": document["id"], "filename": document["file_name"]}
+            for document in known_documents
+            if document["file_name"].casefold() == file_name.casefold()
+        ]
+        stage_ref = staged["file_path"].removeprefix(STAGE_URI)
+        staged.update({
+            "message": "Workspace file successfully imported",
+            "file_path": f"{STAGE_URI}{stage_ref}/{quote(file_name, safe='')}",
+            "minio_path": f"{STAGE_URI}{stage_ref}/{quote(file_name, safe='')}",
+            "kb_id": knowledge_base_id,
+            "filename": file_name,
+            "original_filename": Path(file_name).stem,
+            "workspace_path": virtual_path,
+            "same_name_files": same_name_files,
+            "has_same_name": bool(same_name_files),
+        })
+        results.append(staged)
+    return {"status": "success", "items": results}
 
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/documents")
@@ -1169,12 +1397,114 @@ async def yuxi_get_document_content(knowledge_base_id: str, document_id: str):
         raise HTTPException(status_code=404, detail="文件不存在")
     blocks = db.get_blocks(document_id)
     chunks = db.get_chunks(document_id, include_embedding=False)
-    return {"document_id": document_id, "file_id": document_id, "filename": document["file_name"], "blocks": blocks, "chunks": chunks, "text": "\\n\\n".join(item["text"] for item in blocks)}
+    return {"document_id": document_id, "file_id": document_id, "filename": document["file_name"], "blocks": blocks, "chunks": chunks, "text": "\n\n".join(item["text"] for item in blocks)}
 
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}/documents/{document_id}/download")
 async def yuxi_download_document(knowledge_base_id: str, document_id: str):
     return await rag.download_knowledge_base_document(knowledge_base_id, document_id)
+
+
+def _workspace_knowledge_entry(kb_id: str, item: dict) -> dict:
+    # Entry contract from Yuxi server/routers/workspace_router.py (v0.7.3).
+    is_dir = bool(item.get("is_folder"))
+    is_virtual_folder = bool(item.get("is_virtual_folder"))
+    file_id = item.get("file_id")
+    path_prefix = item.get("path_prefix") or ""
+    if is_virtual_folder:
+        path = f"/knowledge/{kb_id}/virtual/{quote(path_prefix, safe='')}"
+    elif is_dir:
+        path = f"/knowledge/{kb_id}/folder/{file_id}/"
+    else:
+        path = f"/knowledge/{kb_id}/file/{file_id}"
+    return {
+        "source": "knowledge", "kb_id": kb_id, "file_id": file_id,
+        "parent_id": item.get("parent_id"), "path": path, "virtual_path": path,
+        "name": item.get("filename") or file_id, "is_dir": is_dir,
+        "size": 0 if is_dir else int(item.get("file_size") or 0),
+        "modified_at": item.get("updated_at") or item.get("created_at") or "",
+        "readonly": True, "status": item.get("status") or "done",
+        "has_original_file": bool(item.get("has_original_file")),
+        "has_parsed_markdown": bool(item.get("has_parsed_markdown")),
+        "is_virtual_folder": is_virtual_folder, "path_prefix": path_prefix,
+    }
+
+
+@router.get("/api/workspace/knowledge/tree")
+async def yuxi_workspace_knowledge_tree(
+    kb_id: str, parent_id: str | None = None, path_prefix: str = "",
+    page: int = Query(1, ge=1), page_size: int = Query(200, ge=1, le=500),
+    recursive: bool = False, files_only: bool = False,
+):
+    result = await yuxi_list_documents(
+        kb_id, page=page, page_size=page_size, parent_id=parent_id,
+        recursive=recursive, path_prefix=path_prefix, files_only=files_only,
+    )
+    return {
+        "kb_id": kb_id, "readonly": True,
+        "entries": [_workspace_knowledge_entry(kb_id, item) for item in result["items"]
+                    if not files_only or not item.get("is_folder")],
+        "page": result["page"], "page_size": result["page_size"], "total": result["total"],
+        "has_more": result["has_more"], "parent_id": parent_id, "path_prefix": path_prefix,
+    }
+
+
+@router.get("/api/workspace/knowledge/file")
+async def yuxi_workspace_knowledge_preview(kb_id: str, file_id: str):
+    from .yuxi_port import _upstream as _upstream  # noqa: F401
+    from yuxi.utils.filepreview import (
+        MAX_BINARY_PREVIEW_SIZE_BYTES, OfficePreviewConversionError, convert_office_to_pdf,
+        is_office_pdf_preview_file, preview_too_large, render_preview,
+    )
+
+    original = await rag.download_knowledge_base_document(kb_id, file_id)
+    document = db.get_document(file_id)
+    filename = document["file_name"]
+    metadata = {"source": "knowledge", "kb_id": kb_id, "file_id": file_id,
+                "filename": filename, "readonly": True}
+    path = Path(original.path)
+    with path.open("rb") as stream:
+        content = stream.read(MAX_BINARY_PREVIEW_SIZE_BYTES + 1)
+    if len(content) > MAX_BINARY_PREVIEW_SIZE_BYTES:
+        return {**metadata, **preview_too_large().payload()}
+
+    if is_office_pdf_preview_file(filename):
+        cache = Path(settings.rag_upload_dir) / ".previews" / f"{file_id}.pdf"
+        try:
+            if not cache.is_file():
+                converted = await convert_office_to_pdf(filename, content)
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_bytes(converted)
+            content = cache.read_bytes()
+        except OfficePreviewConversionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        filename = f"{Path(filename).stem}.pdf"
+
+    preview = render_preview(filename, content)
+    if isinstance(preview.content, bytes):
+        return Response(
+            content=preview.content, media_type=preview.media_type,
+            headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
+                     "X-Yuxi-Preview-Type": preview.preview_type,
+                     "X-Yuxi-Preview-Filename": quote(filename)},
+        )
+    return {**metadata, **preview.payload()}
+
+
+@router.get("/api/workspace/knowledge/download")
+async def yuxi_workspace_knowledge_download(kb_id: str, file_id: str, variant: str = "original"):
+    if variant == "original":
+        return await rag.download_knowledge_base_document(kb_id, file_id)
+    if variant != "parsed":
+        raise HTTPException(status_code=422, detail="variant 必须是 original 或 parsed")
+    content = await rag.knowledge_base_document_content(kb_id, file_id)
+    if not content["blocks"]:
+        raise HTTPException(status_code=404, detail="文件尚无解析内容")
+    filename = f"{Path(content['file_name']).stem}.md"
+    return Response(
+        content=content["text"], media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
 
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}/images/{object_path:path}")
@@ -1212,27 +1542,27 @@ async def yuxi_get_document(knowledge_base_id: str, document_id: str):
 
 
 def _retrieval_options(knowledge_base: dict) -> dict:
+    from dataclasses import MISSING, fields
+
+    from .provider_api import _model_rows
+    from .yuxi_port import _upstream as _upstream  # noqa: F401
+    from yuxi.knowledge.implementations.milvus import MilvusRetrievalConfig
+
     config = (knowledge_base.get("config") or {}).get("retrieval") or {}
-    options = [
-        {"key": "search_mode", "label": "检索模式", "type": "select", "default": config.get("search_mode", "hybrid"), "options": [
-            {"label": "混合检索", "value": "hybrid"}, {"label": "向量检索", "value": "vector"}, {"label": "关键词检索", "value": "keyword"}
-        ]},
-        {"key": "final_top_k", "label": "最终返回 Chunk 数", "type": "number", "default": config.get("final_top_k", 8), "min": 1, "max": 100},
-        {"key": "similarity_threshold", "label": "相似度阈值（0-1）", "type": "number", "default": config.get("similarity_threshold", 0), "min": 0, "max": 1, "step": 0.01},
-        {"key": "recall_top_k", "label": "召回数量", "type": "number", "default": config.get("recall_top_k", 50), "min": 1, "max": 200},
-        {"key": "bm25_top_k", "label": "BM25 召回数量", "type": "number", "default": config.get("bm25_top_k", 50), "min": 1, "max": 200},
-        {"key": "vector_weight", "label": "向量检索权重", "type": "number", "default": config.get("vector_weight", 0.7), "min": 0, "max": 1, "step": 0.05},
-        {"key": "bm25_weight", "label": "BM25 权重", "type": "number", "default": config.get("bm25_weight", 0.3), "min": 0, "max": 1, "step": 0.05},
-        {"key": "bm25_drop_ratio_search", "label": "BM25 稀疏项丢弃比例", "type": "number", "default": config.get("bm25_drop_ratio_search", 0), "min": 0, "max": 1, "step": 0.01},
-        {"key": "use_reranker", "label": "启用重排序", "type": "boolean", "default": config.get("use_reranker", False)},
-        {"key": "use_graph_retrieval", "label": "启用图检索", "type": "boolean", "default": config.get("use_graph_retrieval", False)},
-        {"key": "graph_entity_top_k", "label": "图实体召回数量", "type": "number", "default": config.get("graph_entity_top_k", 10), "min": 1, "max": 100, "depend_on": ("use_graph_retrieval", True)},
-        {"key": "graph_triple_top_k", "label": "图三元组召回数量", "type": "number", "default": config.get("graph_triple_top_k", 10), "min": 1, "max": 100, "depend_on": ("use_graph_retrieval", True)},
-        {"key": "graph_max_nodes", "label": "图检索最大节点数", "type": "number", "default": config.get("graph_max_nodes", 10000), "min": 100, "max": 50000, "depend_on": ("use_graph_retrieval", True)},
-        {"key": "graph_top_k", "label": "图召回 Chunk 数", "type": "number", "default": config.get("graph_top_k", 20), "min": 1, "max": 200, "depend_on": ("use_graph_retrieval", True)},
-        {"key": "graph_weight", "label": "图检索融合权重", "type": "number", "default": config.get("graph_weight", 1.0), "min": 0, "max": 5, "step": 0.1, "depend_on": ("use_graph_retrieval", True)},
-        {"key": "ppr_damping", "label": "PPR 阻尼系数", "type": "number", "default": config.get("ppr_damping", 0.85), "min": 0.1, "max": 0.99, "step": 0.01, "depend_on": ("use_graph_retrieval", True)},
+    rerank_models = [
+        {"label": model["display_name"], "value": model["spec"]}
+        for provider in _model_rows("rerank").values()
+        for model in provider["models"]
     ]
+    options = []
+    for field in fields(MilvusRetrievalConfig):
+        metadata = dict(field.metadata)
+        options_provider = metadata.pop("options_provider", None)
+        default = None if field.default is MISSING else field.default
+        option = {"key": field.name, "default": config.get(field.name, default), **metadata}
+        if options_provider == "rerank_models":
+            option["options"] = rerank_models
+        options.append(option)
     return {"params": {"options": options}, **config}
 
 

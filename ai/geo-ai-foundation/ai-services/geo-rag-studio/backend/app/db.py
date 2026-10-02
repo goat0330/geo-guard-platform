@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS documents (
   error_message TEXT,
   knowledge_base_id TEXT,
   folder_id TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS knowledge_bases (
   id TEXT PRIMARY KEY,
@@ -149,6 +150,8 @@ def _migrate(connection):
         connection.execute("ALTER TABLE documents ADD COLUMN folder_id TEXT")
     if "error_message" not in columns:
         connection.execute("ALTER TABLE documents ADD COLUMN error_message TEXT")
+    if "updated_at" not in columns:
+        connection.execute("ALTER TABLE documents ADD COLUMN updated_at TEXT")
     existing = connection.execute(
         "SELECT id FROM knowledge_bases WHERE id='KB-LOCAL-DEFAULT'"
     ).fetchone()
@@ -190,15 +193,16 @@ def default_knowledge_base_config() -> dict:
         },
         "parser": {"engine": "auto", "mineru_api_uri": "", "api_key": ""},
         "retrieval": {
-            "search_mode": "hybrid",
+            "search_mode": "vector",
             "recall_top_k": 50,
             "bm25_top_k": 50,
-            "final_top_k": 8,
+            "final_top_k": 10,
             "similarity_threshold": 0.0,
             "vector_weight": 0.7,
             "bm25_weight": 0.3,
             "bm25_drop_ratio_search": 0.0,
             "use_reranker": False,
+            "reranker_model": "",
             "use_graph_retrieval": False,
             "graph_entity_top_k": 10,
             "graph_triple_top_k": 10,
@@ -209,6 +213,11 @@ def default_knowledge_base_config() -> dict:
         },
         "embedding": {"base_url": "", "model": "", "dimensions": None, "batch_size": 32},
         "reranker": {"base_url": "", "model": "", "protocol": "openai"},
+        "share_config": {
+            "version": 2,
+            "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+            "manage_scope": None,
+        },
     }
 
 
@@ -340,8 +349,8 @@ def rename_folder(folder_id: str, knowledge_base_id: str, name: str) -> dict | N
 def move_document(document_id: str, knowledge_base_id: str, folder_id: str | None) -> bool:
     with connect() as connection:
         cursor = connection.execute(
-            "UPDATE documents SET folder_id=? WHERE id=? AND knowledge_base_id=?",
-            (folder_id, document_id, knowledge_base_id),
+            "UPDATE documents SET folder_id=?, updated_at=? WHERE id=? AND knowledge_base_id=?",
+            (folder_id, now_iso(), document_id, knowledge_base_id),
         )
     return cursor.rowcount > 0
 
@@ -593,10 +602,11 @@ def ensure_folder_path(knowledge_base_id: str, relative_path: str | None, parent
 
 def create_document(file_name, file_path, mime_type, parser, preset, parser_config, metadata, knowledge_base_id=None, folder_id=None):
     document_id = new_id("DOC")
+    timestamp = now_iso()
     with connect() as connection:
         connection.execute(
-            "INSERT INTO documents (id, file_name, file_path, mime_type, status, parser, chunk_preset_id, chunk_parser_config_json, metadata_json, knowledge_base_id, folder_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO documents (id, file_name, file_path, mime_type, status, parser, chunk_preset_id, chunk_parser_config_json, metadata_json, knowledge_base_id, folder_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 document_id,
                 file_name,
@@ -609,7 +619,8 @@ def create_document(file_name, file_path, mime_type, parser, preset, parser_conf
                 json.dumps(metadata or {}, ensure_ascii=False),
                 knowledge_base_id,
                 folder_id,
-                now_iso(),
+                timestamp,
+                timestamp,
             ),
         )
     return document_id
@@ -624,13 +635,13 @@ def update_document_status(document_id: str, status: str, error: str | None = No
             metadata = json.loads(row["metadata_json"] or "{}") if row else {}
             metadata["indexing_error"] = error[:500]
             connection.execute(
-                "UPDATE documents SET status=?, error_message=?, metadata_json=?, parser=COALESCE(?, parser) WHERE id=?",
-                (status, error[:500], json.dumps(metadata, ensure_ascii=False), parser, document_id),
+                "UPDATE documents SET status=?, error_message=?, metadata_json=?, parser=COALESCE(?, parser), updated_at=? WHERE id=?",
+                (status, error[:500], json.dumps(metadata, ensure_ascii=False), parser, now_iso(), document_id),
             )
         else:
             connection.execute(
-                "UPDATE documents SET status=?, error_message=NULL, parser=COALESCE(?, parser) WHERE id=?",
-                (status, parser, document_id),
+                "UPDATE documents SET status=?, error_message=NULL, parser=COALESCE(?, parser), updated_at=? WHERE id=?",
+                (status, parser, now_iso(), document_id),
             )
 
 
@@ -713,6 +724,20 @@ def list_documents(knowledge_base_id: str | None = None):
     return documents
 
 
+def search_documents(knowledge_base_id: str, query: str, offset: int, limit: int):
+    # Yuxi KnowledgeFileRepository.search_files: literal filename match, then pagination.
+    escaped_query = query.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    filters = "knowledge_base_id=? AND lower(file_name) LIKE ? ESCAPE '\\'"
+    params = (knowledge_base_id, f"%{escaped_query}%")
+    with connect() as connection:
+        total = connection.execute(f"SELECT COUNT(*) FROM documents WHERE {filters}", params).fetchone()[0]
+        rows = connection.execute(
+            f"SELECT * FROM documents WHERE {filters} ORDER BY COALESCE(updated_at, created_at) DESC, id ASC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+    return [_document(row) for row in rows], total
+
+
 def get_blocks(document_id: str):
     with connect() as connection:
         rows = connection.execute(
@@ -757,6 +782,7 @@ def _document(row):
         "knowledge_base_id": row["knowledge_base_id"],
         "folder_id": row["folder_id"],
         "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
     }
 
 

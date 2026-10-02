@@ -232,6 +232,8 @@ async def get_ocr_health():
     async def check(engine_id: str) -> tuple[str, dict]:
         try:
             processor = _build_processor(engine_id)
+            if engine_id == "rapid_ocr":
+                importlib.import_module("rapidocr.inference_engine.onnxruntime.main")
             result = await asyncio.to_thread(processor.check_health)
             return engine_id, {key: result[key] for key in ("status", "message") if key in result}
         except ImportError as exc:

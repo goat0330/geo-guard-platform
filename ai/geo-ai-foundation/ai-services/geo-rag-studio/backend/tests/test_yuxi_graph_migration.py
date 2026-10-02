@@ -156,7 +156,7 @@ def test_yuxi_graph_retrieval_runs_through_local_debug_pipeline(tmp_path, monkey
             "name": "Yuxi 图检索运行链路",
             "config": {
                 "embedding": {"model": "test-embedding"},
-                "retrieval": {"search_mode": "keyword", "use_graph_retrieval": True},
+                "retrieval": {"search_mode": "keyword", "use_graph_retrieval": True, "recall_top_k": 3, "final_top_k": 1},
             },
         },
     ).json()
@@ -201,6 +201,7 @@ def test_yuxi_graph_retrieval_runs_through_local_debug_pipeline(tmp_path, monkey
     assert response.status_code == 200, response.text
     debug = response.json()
     assert debug["result"]["retrieval"]["graph_status"] == "completed"
+    assert debug["config_snapshot"]["retrieval"]["recall_top_k"] == 3
     assert debug["graph_candidates"][0]["chunk_id"] == chunk["id"]
     assert debug["fusion_candidates"][0]["score_type"] == "yuxi_weighted_rrf_k60"
     assert debug["final_evidences"][0]["chunk_id"] == chunk["id"]

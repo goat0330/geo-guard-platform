@@ -32,6 +32,7 @@ dependencies = [
   "tzdata>=2025.2",
   "pypdfium2>=5.0.0",
   "rapidocr>=3.0.0",
+  "onnxruntime>=1.20.0",
   "requests>=2.34.0",
   "networkx>=3.5",
   "minio>=7.2.7",

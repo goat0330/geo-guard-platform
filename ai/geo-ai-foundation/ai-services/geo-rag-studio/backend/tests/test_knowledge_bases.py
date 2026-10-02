@@ -58,6 +58,7 @@ def test_local_knowledge_base_isolates_documents_and_hides_api_keys(tmp_path, mo
         "/api/v1/debug/retrieve",
         json={
             "query": "斜坡稳定性 降雨 裂缝",
+            "search_mode": "keyword",
             "final_top_k": 3,
             "filters": {"knowledge_base_id": knowledge_base["id"]},
         },
@@ -70,7 +71,7 @@ def test_local_knowledge_base_isolates_documents_and_hides_api_keys(tmp_path, mo
 
     empty_retrieval = client.post(
         "/api/v1/debug/retrieve",
-        json={"query": "裂缝", "filters": {"knowledge_base_id": other["id"]}},
+        json={"query": "裂缝", "search_mode": "keyword", "filters": {"knowledge_base_id": other["id"]}},
     )
     assert empty_retrieval.status_code == 200
     assert empty_retrieval.json()["result"]["evidences"] == []
@@ -178,7 +179,7 @@ def test_pdf_indexes_retrieves_and_locates_bbox(tmp_path, monkeypatch, pdf_sampl
     assert debug["final_evidences"]
     assert debug["final_context"]
     assert debug["timing"]["total"] >= 0
-    assert debug["config_snapshot"]["retrieval"]["recall_top_k"] == 12
+    assert debug["config_snapshot"]["retrieval"]["recall_top_k"] == 4
     assert len(debug["final_evidences"]) <= 4
     evidence = debug["final_evidences"][0]
     assert evidence["evidence_id"] and evidence["document_id"] and evidence["chunk_id"]

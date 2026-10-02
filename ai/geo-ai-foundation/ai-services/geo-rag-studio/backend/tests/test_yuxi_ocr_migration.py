@@ -1,4 +1,5 @@
 from pathlib import Path
+import importlib
 
 from fastapi.testclient import TestClient
 
@@ -8,6 +9,79 @@ from app.ocr_api import _upstream  # noqa: F401
 from app.ocr_api import _build_processor
 from app import ocr_api
 from yuxi.knowledge.parser.capabilities import PARSER_CAPABILITIES
+
+
+def test_rapidocr_onnx_runtime_is_available_for_migrated_parser():
+    # Importing the concrete engine must work before model download or PDF parsing.
+    # This catches missing runtime wheels without making tests depend on network models.
+    importlib.import_module("rapidocr.inference_engine.onnxruntime.main")
+
+
+def test_rapidocr_health_reports_missing_runtime(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    import_module = ocr_api.importlib.import_module
+
+    def without_onnxruntime(module_name, *args, **kwargs):
+        if module_name == "rapidocr.inference_engine.onnxruntime.main":
+            raise ModuleNotFoundError("No module named 'onnxruntime'", name="onnxruntime")
+        return import_module(module_name, *args, **kwargs)
+
+    monkeypatch.setattr(ocr_api.importlib, "import_module", without_onnxruntime)
+    health = client.get("/api/system/ocr/health").json()["health"]["rapid_ocr"]
+
+    assert health["status"] == "unavailable"
+    assert "onnxruntime" in health["message"]
+
+
+def test_rapidocr_pdf_upload_preserves_page_and_bbox(tmp_path, monkeypatch, pdf_sample):
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "embedding_base_url", "")
+    monkeypatch.setattr(settings, "embedding_api_key", "")
+    monkeypatch.setattr(settings, "embedding_model", "")
+    knowledge_base = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "OCR 页面定位", "config": {"parser": {"engine": "rapid_ocr"}}},
+    ).json()
+
+    class Result:
+        boxes = [[(144, 144), (600, 144), (600, 220), (144, 220)]]
+        txts = ["Slope crack after rainfall"]
+
+    class Processor:
+        def _load_model(self):
+            pass
+
+        def _create_temp_image_file(self, image):
+            image_path = tmp_path / "ocr-page.png"
+            image.save(image_path)
+            return str(image_path)
+
+        def ocr(self, image_path):
+            assert Path(image_path).is_file()
+            return Result()
+
+    monkeypatch.setattr(ocr_api, "_build_processor", lambda _engine: Processor())
+    with Path(pdf_sample).open("rb") as pdf:
+        uploaded = client.post(
+            "/api/v1/documents/upload",
+            data={"knowledge_base_id": knowledge_base["id"]},
+            files={"file": (Path(pdf_sample).name, pdf, "application/pdf")},
+        )
+    assert uploaded.status_code == 200, uploaded.text
+
+    document = client.get(f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents").json()[0]
+    assert document["status"] == "indexed"
+    blocks = client.get(
+        f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/{document['id']}/content"
+    ).json()["blocks"]
+    assert blocks[0]["page"] == 1
+    assert blocks[0]["bbox"] == [72.0, 72.0, 300.0, 110.0]
+    chunks = client.get(
+        f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/{document['id']}/chunks"
+    ).json()
+    span = chunks[0]["source_spans"][0]
+    assert span["page"] == 1
+    assert span["bbox"] == [72.0, 72.0, 300.0, 110.0]
 
 
 def _client(tmp_path, monkeypatch):

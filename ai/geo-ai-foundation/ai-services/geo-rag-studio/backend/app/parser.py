@@ -44,6 +44,62 @@ def parse_pdf_layout(path: str) -> list[dict]:
     return blocks
 
 
+def _parse_pdf_with_rapid_ocr(path: str, processor) -> list[dict]:
+    """Use the migrated Yuxi OCR model while retaining its detected PDF text boxes."""
+    from PIL import Image
+
+    processor._load_model()
+    blocks = []
+    ordinal = 0
+    with fitz.open(path) as document:
+        for page_number, page in enumerate(document, start=1):
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+            image_path = processor._create_temp_image_file(image)
+            try:
+                result = processor.ocr(image_path)
+            finally:
+                Path(image_path).unlink(missing_ok=True)
+
+            page_width = float(page.rect.width)
+            page_height = float(page.rect.height)
+            boxes = getattr(result, "boxes", None)
+            texts = getattr(result, "txts", None)
+            if texts is None:
+                texts = []
+            scale_x = page_width / pixmap.width
+            scale_y = page_height / pixmap.height
+            for index, raw_text in enumerate(texts):
+                text = str(raw_text or "").strip()
+                if not text:
+                    continue
+                bbox = None
+                if boxes is not None and index < len(boxes):
+                    try:
+                        points = boxes[index]
+                        xs = [float(point[0]) for point in points]
+                        ys = [float(point[1]) for point in points]
+                        x0, y0 = min(xs) * scale_x, min(ys) * scale_y
+                        x1, y1 = max(xs) * scale_x, max(ys) * scale_y
+                        if x0 >= 0 and y0 >= 0 and x1 > x0 and y1 > y0 and x1 <= page_width and y1 <= page_height:
+                            bbox = [x0, y0, x1, y1]
+                    except (TypeError, ValueError, IndexError):
+                        bbox = None
+                blocks.append(
+                    {
+                        "id": new_id("BLK"),
+                        "ordinal": ordinal,
+                        "page": page_number,
+                        "text": text,
+                        "bbox": bbox,
+                        "page_width": page_width,
+                        "page_height": page_height,
+                    }
+                )
+                ordinal += 1
+    return blocks
+
+
 def parse_text(text: str) -> list[dict]:
     return [
         {
@@ -221,6 +277,11 @@ async def parse_file(path: str, parser_options: dict | None = None) -> tuple[lis
             # Geo RAG stores source files locally; retain PaddleOCR's original image URLs
             # instead of requiring Yuxi's MinIO image store.
             processor._upload_markdown_image = lambda image_url, _image_path, _params: image_url
+        if engine_id == "rapid_ocr" and suffix == ".pdf":
+            blocks = await asyncio.to_thread(_parse_pdf_with_rapid_ocr, str(file_path), processor)
+            if not blocks:
+                raise ValueError(f"OCR 引擎 {engine_id} 未返回可索引文本")
+            return blocks, engine_id
         markdown = await asyncio.to_thread(processor.process_file, str(file_path), {})
         blocks = parse_text(markdown or "")
         if suffix in {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}:

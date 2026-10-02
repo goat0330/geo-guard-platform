@@ -9,6 +9,7 @@ class Settings(BaseSettings):
 
     rag_db_path: str = "../data/rag-v2.sqlite3"
     rag_upload_dir: str = "../data/documents-v2"
+    rag_workspace_dir: str = "../data/workspace"
     rag_search_backend: str = "sqlite"
     embedding_base_url: str = ""
     embedding_api_key: str = ""
@@ -53,6 +54,7 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         Path(self.rag_db_path).parent.mkdir(parents=True, exist_ok=True)
         Path(self.rag_upload_dir).mkdir(parents=True, exist_ok=True)
+        Path(self.rag_workspace_dir).mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()
