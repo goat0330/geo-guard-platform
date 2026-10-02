@@ -582,7 +582,7 @@ async def _process_document_batch(knowledge_base_id: str, document_ids: list[str
             failures.append({"document_id": document_id, "error_message": "Document not found"})
             continue
         try:
-            result = await (parse_existing_document(document_id, params) if operation == "parse" else index_existing_document(document_id))
+            result = await (parse_existing_document(document_id, params) if operation == "parse" else index_existing_document(document_id, params))
             processed.append(result)
         except Exception as exc:
             failures.append({"document_id": document_id, "error_message": str(exc)[:500]})
@@ -602,13 +602,13 @@ async def parse_pending_knowledge_base_documents(knowledge_base_id: str, params:
 
 @app.post("/api/v1/knowledge-bases/{knowledge_base_id}/documents/index")
 async def index_knowledge_base_documents(knowledge_base_id: str, request: DocumentBatchPayload):
-    return await _process_document_batch(knowledge_base_id, request.document_ids, "index")
+    return await _process_document_batch(knowledge_base_id, request.document_ids, "index", request.params)
 
 
 @app.post("/api/v1/knowledge-bases/{knowledge_base_id}/documents/index-pending")
-async def index_pending_knowledge_base_documents(knowledge_base_id: str):
+async def index_pending_knowledge_base_documents(knowledge_base_id: str, params: dict | None = None):
     items = [doc["id"] for doc in db.list_documents(knowledge_base_id) if doc["status"] == "parsed"]
-    return await _process_document_batch(knowledge_base_id, items, "index")
+    return await _process_document_batch(knowledge_base_id, items, "index", params)
 
 
 @app.get("/api/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}/chunks")

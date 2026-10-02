@@ -157,7 +157,13 @@ def test_yuxi_document_upload_uses_selected_upstream_ocr_engine(tmp_path, monkey
     )
 
     assert added.status_code == 200, added.text
+    assert calls == []
+    file_id = added.json()["items"][0]["file_id"]
+    assert added.json()["items"][0]["file_meta"]["processing_params"]["ocr_engine"] == "pp_structure_v3_ocr"
+    parsed = client.post(f"/api/knowledge/databases/{kb_id}/documents/parse", json={"file_ids": [file_id]})
+    assert parsed.status_code == 200, parsed.text
+    assert parsed.json()["failed"] == []
     assert calls == [(".pdf", {})]
-    document = added.json()["processed"][0]
-    assert document["result"]["parser"] == "pp_structure_v3_ocr"
-    assert document["result"]["status"] == "parsed"
+    document = parsed.json()["processed"][0]
+    assert document["parser"] == "pp_structure_v3_ocr"
+    assert document["status"] == "parsed"

@@ -29,7 +29,8 @@ from .config import settings
 from .schemas import DocumentBatchPayload, DocumentMovePayload, EmbeddingTestRequest, EvaluationRunPayload, GraphConfigPayload, KnowledgeBasePayload, KnowledgeBaseUpdatePayload, MindMapPayload, RerankerTestRequest, RetrieveRequest
 from .yuxi_port.chunk_presets import get_options
 from .parser import parse_file_markdown
-from yuxi.knowledge.utils.kb_utils import calculate_content_hash
+from .pipeline import document_processing_params
+from yuxi.knowledge.utils.kb_utils import calculate_content_hash, params_for_uploaded_document
 
 router = APIRouter()
 STAGE_URI = "local-stage://"
@@ -56,6 +57,10 @@ def _yuxi_document(document: dict) -> dict:
         "status": document.get("status", "uploaded"),
         "parser": document.get("parser"),
         "chunk_preset_id": document.get("chunk_preset_id"),
+        "processing_params": metadata.get("processing_params") or {
+            "chunk_preset_id": document.get("chunk_preset_id"),
+            "chunk_parser_config": document.get("chunk_parser_config") or {},
+        },
         "chunk_count": document.get("chunk_count", 0),
         "token_count": document.get("token_count", 0),
         "embedding_chunk_count": document.get("embedding_chunk_count", 0),
@@ -1283,8 +1288,30 @@ async def yuxi_import_workspace_files(payload: dict = Body(...)):
 
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/documents")
-@router.post("/api/knowledge/databases/{knowledge_base_id}/documents/add")
 async def yuxi_add_documents(knowledge_base_id: str, payload: dict = Body(...)):
+    return await _add_documents(knowledge_base_id, payload, parse_after_upload=True)
+
+
+@router.post("/api/knowledge/databases/{knowledge_base_id}/documents/add")
+async def yuxi_add_uploaded_documents(knowledge_base_id: str, payload: dict = Body(...)):
+    result = await _add_documents(knowledge_base_id, payload, parse_after_upload=False)
+    items = []
+    for entry in result["processed"]:
+        document = db.get_document(entry["file_id"])
+        items.append({"index": entry["index"], "item": entry["item"], "file_id": entry["file_id"],
+                      "status": document["status"], "file_meta": _yuxi_document(document)})
+    failed_items = [{"index": entry["index"], "item": entry["item"], "status": "failed",
+                     "error": f"添加记录失败: {entry['error_message']}", "error_type": "add_failed"}
+                    for entry in result["failed"]]
+    added, failed = len(items), len(failed_items)
+    status = "success" if not failed else "failed" if not added else "partial_failed"
+    message = (f"已添加 {added} 个文件" if not failed else
+               f"文件添加失败，失败 {failed} 个" if not added else f"已添加 {added} 个文件，失败 {failed} 个")
+    return {"message": message, "status": status, "items": items, "failed_items": failed_items,
+            "added": added, "failed": failed}
+
+
+async def _add_documents(knowledge_base_id: str, payload: dict, parse_after_upload: bool):
     knowledge_base = rag._knowledge_base_or_404(knowledge_base_id)
     if knowledge_base["kb_type"] != "local":
         raise HTTPException(status_code=400, detail="只读连接器不能添加本地文件")
@@ -1295,22 +1322,21 @@ async def yuxi_add_documents(knowledge_base_id: str, payload: dict = Body(...)):
     config = knowledge_base.get("config") or {}
     chunking = config.get("chunking") or {}
     parser = config.get("parser") or {}
-    embedding = config.get("embedding") or {}
     processed, failed = [], []
     stage_root = (Path(settings.rag_upload_dir) / ".yuxi_staging").resolve()
     upload_root = Path(settings.rag_upload_dir).resolve()
-    for item in items:
+    for index, item in enumerate(items):
         if not isinstance(item, str) or not item.startswith(STAGE_URI):
-            failed.append({"item": str(item), "error_message": "该文件不是本地服务上传的暂存文件"})
+            failed.append({"index": index, "item": str(item), "error_message": "该文件不是本地服务上传的暂存文件"})
             continue
         stage_id = item.removeprefix(STAGE_URI)
         data_path, metadata_path = _staging_paths(stage_id)
         if not data_path.is_file() or not metadata_path.is_file() or data_path.resolve().parent != stage_root:
-            failed.append({"item": item, "error_message": "上传暂存文件不存在或已过期"})
+            failed.append({"index": index, "item": item, "error_message": "上传暂存文件不存在或已过期"})
             continue
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata.get("knowledge_base_id") not in (None, knowledge_base_id):
-            failed.append({"item": item, "error_message": "暂存文件属于另一个知识库"})
+            failed.append({"index": index, "item": item, "error_message": "暂存文件属于另一个知识库"})
             continue
         source_paths = params.get("source_paths") or {}
         source_value = source_paths.get(item, metadata["filename"]) if isinstance(source_paths, dict) else metadata["filename"]
@@ -1319,7 +1345,7 @@ async def yuxi_add_documents(knowledge_base_id: str, payload: dict = Body(...)):
             if source_path.is_absolute() or any(part in {".", ".."} for part in source_path.parts) or ":" in source_path.parts[0]:
                 raise ValueError("文件相对路径无效")
         except (IndexError, ValueError) as exc:
-            failed.append({"item": item, "error_message": str(exc) or "文件相对路径无效"})
+            failed.append({"index": index, "item": item, "error_message": str(exc) or "文件相对路径无效"})
             continue
         relative_path = source_path.as_posix() if len(source_path.parts) > 1 else None
         file_name = source_path.name or metadata["filename"]
@@ -1341,14 +1367,18 @@ async def yuxi_add_documents(knowledge_base_id: str, payload: dict = Body(...)):
             knowledge_base_id, folder_id,
         )
         try:
-            parser_override = {"ocr_engine": params["ocr_engine"]} if params.get("ocr_engine") else None
-            result = await rag.parse_existing_document(document_id, parser_override)
-            if params.get("auto_index"):
-                result = await rag.index_existing_document(document_id)
-            processed.append({"document_id": document_id, "file_id": document_id, "result": result})
+            processing_params = document_processing_params(
+                db.get_document(document_id), config, params_for_uploaded_document(item, params))
+            db.update_document_processing_params(document_id, processing_params)
+            result = {"document_id": document_id, "status": "uploaded"}
+            if parse_after_upload:
+                result = await rag.parse_existing_document(document_id)
+                if params.get("auto_index"):
+                    result = await rag.index_existing_document(document_id)
+            processed.append({"index": index, "item": item, "document_id": document_id, "file_id": document_id, "result": result})
         except Exception as exc:
             db.update_document_status(document_id, "failed", str(exc)[:500])
-            failed.append({"document_id": document_id, "file_id": document_id, "error_message": str(exc)[:500]})
+            failed.append({"index": index, "item": item, "document_id": document_id, "file_id": document_id, "error_message": str(exc)[:500]})
     result_status = "success" if not failed else "error" if not processed else "partial"
     return {"status": result_status, "message": f"已处理 {len(processed)} 个文件，失败 {len(failed)} 个", "processed": processed, "failed": failed}
 
@@ -1378,7 +1408,7 @@ async def yuxi_index_documents(knowledge_base_id: str, payload: dict = Body(...)
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/documents/index-pending")
 async def yuxi_index_pending(knowledge_base_id: str, payload: dict = Body(default={} )):
-    result = await rag.index_pending_knowledge_base_documents(knowledge_base_id)
+    result = await rag.index_pending_knowledge_base_documents(knowledge_base_id, payload.get("params") or {})
     return {**result, "status": "success" if not result["failed"] else "partial", "message": f"入库完成 {len(result['processed'])} 个，失败 {len(result['failed'])} 个"}
 
 

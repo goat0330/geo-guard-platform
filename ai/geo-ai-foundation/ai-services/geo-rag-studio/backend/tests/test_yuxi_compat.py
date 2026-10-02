@@ -27,6 +27,103 @@ def _client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
+def test_add_uploaded_document_preserves_uploaded_state(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "仅添加文件", "kb_type": "local"}).json()["kb_id"]
+    staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
+                         files={"file": ("原始记录.txt", "降雨后巡查坡体裂缝。".encode(), "text/plain")}).json()
+    added = client.post(f"/api/knowledge/databases/{kb_id}/documents/add",
+                        json={"items": [staged["file_path"]], "params": {"auto_index": True}})
+    assert added.status_code == 200, added.text
+    result = added.json()
+    assert set(result) == {"message", "status", "items", "failed_items", "added", "failed"}
+    assert result["added"] == 1 and result["failed"] == 0
+    assert result["failed_items"] == []
+    entry = result["items"][0]
+    assert set(entry) == {"index", "item", "file_id", "status", "file_meta"}
+    assert entry["index"] == 0 and entry["item"] == staged["file_path"]
+    assert entry["status"] == entry["file_meta"]["status"] == "uploaded"
+    doc_id = entry["file_id"]
+    assert db.get_document(doc_id)["status"] == "uploaded"
+    assert db.get_blocks(doc_id) == []
+    assert db.get_chunks(doc_id) == []
+
+
+def test_index_uses_and_persists_native_file_chunk_overrides(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "单文件分块参数", "kb_type": "local"}).json()["kb_id"]
+    text = "||".join(f"第{index}段降雨与裂缝巡查记录。" for index in range(30))
+    staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
+                         files={"file": ("巡查.txt", text.encode(), "text/plain")}).json()
+    added = client.post(f"/api/knowledge/databases/{kb_id}/documents",
+                        json={"items": [staged["file_path"]], "params": {"auto_index": False}}).json()
+    doc_id = added["processed"][0]["document_id"]
+    params = {"chunk_preset_id": "separator", "chunk_parser_config":
+              {"chunk_token_num": 64, "overlapped_percent": 0, "delimiter": "||"}}
+    indexed = client.post(f"/api/knowledge/databases/{kb_id}/documents/index",
+                          json={"file_ids": [doc_id], "params": params})
+    assert indexed.status_code == 200, indexed.text
+    assert indexed.json()["failed"] == []
+    assert indexed.json()["processed"][0]["chunk_preset_id"] == "separator"
+    doc = db.get_document(doc_id)
+    assert doc["chunk_preset_id"] == "separator"
+    assert doc["chunk_parser_config"] == params["chunk_parser_config"]
+    expected_params = {**params, "chunk_engine_version": "ragflow_like_v1"}
+    assert doc["metadata"]["processing_params"] == expected_params
+    basic = client.get(f"/api/knowledge/databases/{kb_id}/documents/{doc_id}/basic").json()
+    assert basic["processing_params"] == expected_params
+    chunks = db.get_chunks(doc_id)
+    assert chunks and all(item["metadata"]["preset"] == "separator" for item in chunks)
+    from yuxi.knowledge.chunking.ragflow_like.dispatcher import chunk_markdown
+    markdown = "\n".join(block["text"] for block in db.get_blocks(doc_id) if block["text"].strip())
+    expected_chunks = chunk_markdown(markdown_content=markdown, file_id=doc_id,
+                                    filename="巡查.txt", processing_params=params)
+    assert [item["text"] for item in chunks] == [item["content"].strip() for item in expected_chunks]
+    reindexed = client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [doc_id]})
+    assert reindexed.json()["failed"] == []
+    assert db.get_document(doc_id)["metadata"]["processing_params"] == expected_params
+    partial_params = {"chunk_parser_config": {"chunk_token_num": 128}}
+    partial_index = client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [doc_id], "params": partial_params})
+    assert partial_index.json()["failed"] == []
+    assert db.get_document(doc_id)["chunk_parser_config"] == {**params["chunk_parser_config"], "chunk_token_num": 128}
+    assert db.get_knowledge_base(kb_id)["config"]["chunking"]["chunk_preset_id"] == "general"
+
+
+def test_index_pending_forwards_native_chunk_params(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "待入库参数", "kb_type": "local"}).json()["kb_id"]
+    staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
+                         files={"file": ("巡查.txt", "降雨||裂缝".encode(), "text/plain")}).json()
+    added = client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]]}).json()
+    doc_id = added["processed"][0]["file_id"]
+    result = client.post(f"/api/knowledge/databases/{kb_id}/documents/index-pending",
+                         json={"params": {"chunk_preset_id": "separator", "chunk_parser_config": {"delimiter": "||"}}})
+    assert result.status_code == 200, result.text
+    assert result.json()["failed"] == []
+    assert db.get_document(doc_id)["chunk_preset_id"] == "separator"
+    assert db.get_document(doc_id)["chunk_parser_config"]["delimiter"] == "||"
+
+
+def test_add_uploaded_documents_reports_native_partial_failure(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "添加返回契约", "kb_type": "local"}).json()["kb_id"]
+    staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
+                         files={"file": ("巡查.txt", "降雨后复核裂缝".encode(), "text/plain")}).json()
+    result = client.post(f"/api/knowledge/databases/{kb_id}/documents/add",
+                         json={"items": [staged["file_path"], "invalid-source"], "params": {
+                             "source_paths": {staged["file_path"]: "资料/巡查.txt"}, "auto_index": True}}).json()
+    assert result["status"] == "partial_failed"
+    assert result["added"] == result["failed"] == 1
+    assert result["items"][0]["status"] == "uploaded"
+    failure = result["failed_items"][0]
+    assert set(failure) == {"index", "item", "status", "error", "error_type"}
+    assert failure["index"] == 1 and failure["item"] == "invalid-source"
+    assert failure["status"] == "failed" and failure["error_type"] == "add_failed"
+    params = result["items"][0]["file_meta"]["processing_params"]
+    assert params["source_path"] == "资料/巡查.txt"
+    assert "source_paths" not in params and "auto_index" not in params
+
+
 def test_yuxi_workspace_tree_create_and_reject_traversal(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     workspace = Path(settings.rag_workspace_dir)
@@ -134,7 +231,15 @@ def test_yuxi_workspace_pdf_import_runs_real_document_pipeline(tmp_path, monkeyp
     )
     assert added.status_code == 200, added.text
     assert added.json()["status"] == "success"
-    document_id = added.json()["processed"][0]["document_id"]
+    document_id = added.json()["items"][0]["file_id"]
+    assert db.get_document(document_id)["status"] == "uploaded"
+    parsed_result = client.post(f"/api/knowledge/databases/{kb_id}/documents/parse", json={"file_ids": [document_id]})
+    assert parsed_result.status_code == 200, parsed_result.text
+    assert parsed_result.json()["failed"] == []
+    assert db.get_document(document_id)["status"] == "parsed"
+    indexed_result = client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [document_id]})
+    assert indexed_result.status_code == 200, indexed_result.text
+    assert indexed_result.json()["failed"] == []
     document = next(row for row in client.get(f"/api/knowledge/databases/{kb_id}/documents").json()["items"] if row["file_id"] == document_id)
     assert document["status"] == "indexed"
     assert document["chunk_count"] > 0

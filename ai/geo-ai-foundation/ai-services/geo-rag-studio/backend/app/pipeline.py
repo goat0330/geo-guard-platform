@@ -9,6 +9,27 @@ from . import milvus_store
 from .parser import parse_file, parse_text
 from .yuxi_port.chunk_presets import normalize_chunk_config, normalize_preset
 from .yuxi_port.chunking import chunk_blocks
+from yuxi.knowledge.utils.kb_utils import resolve_processing_params
+
+
+def document_processing_params(document: dict, kb_config: dict, request_params: dict | None = None) -> dict:
+    chunking = kb_config.get("chunking") or {}
+    stored = (document.get("metadata") or {}).get("processing_params")
+    if stored is None and document.get("chunk_preset_id"):
+        stored = {"chunk_preset_id": document["chunk_preset_id"],
+                  "chunk_parser_config": document.get("chunk_parser_config") or {}}
+    request = dict(request_params or {})
+    if request.get("chunk_preset_id"):
+        normalize_preset(request["chunk_preset_id"])
+    if "chunk_parser_config" in request and not isinstance(request["chunk_parser_config"], dict):
+        raise ValueError("chunk_parser_config must be an object")
+    params = resolve_processing_params(
+        {"chunk_preset_id": chunking.get("chunk_preset_id", "general"),
+         "chunk_parser_config": {key: value for key, value in chunking.items() if key != "chunk_preset_id"}},
+        stored, request,
+    )
+    params["chunk_parser_config"] = normalize_chunk_config(params["chunk_parser_config"])
+    return params
 
 
 def _embedding_model(config: dict | None) -> str:
@@ -237,10 +258,14 @@ async def parse_existing_document(document_id: str, parser_override: dict | None
     knowledge_base = db.get_knowledge_base(document["knowledge_base_id"]) if document.get("knowledge_base_id") else None
     kb_config = knowledge_base.get("config", {}) if knowledge_base else {}
     parser_config = {**(kb_config.get("parser", {}) or {}), **(parser_override or {})}
+    processing_params = document_processing_params(document, kb_config, parser_override)
+    if processing_params.get("ocr_engine"):
+        parser_config["ocr_engine"] = processing_params["ocr_engine"]
     if parser_config.get("ocr_engine"):
         parser_config["engine"] = parser_config.pop("ocr_engine")
     path = document.get("file_path")
     try:
+        db.update_document_processing_params(document_id, processing_params)
         db.update_document_status(document_id, "parsing")
         if path and Path(path).is_file():
             blocks, parser_name = await parse_file(path, parser_config)
@@ -257,7 +282,7 @@ async def parse_existing_document(document_id: str, parser_override: dict | None
         raise
 
 
-async def index_existing_document(document_id: str) -> dict:
+async def index_existing_document(document_id: str, params: dict | None = None) -> dict:
     document = db.get_document(document_id)
     if not document:
         raise ValueError("Document not found")
@@ -265,22 +290,19 @@ async def index_existing_document(document_id: str) -> dict:
         raise ValueError(f"文件当前状态 {document['status']}，不能开始索引")
     knowledge_base = db.get_knowledge_base(document["knowledge_base_id"]) if document.get("knowledge_base_id") else None
     kb_config = knowledge_base.get("config", {}) if knowledge_base else {}
-    chunking = kb_config.get("chunking", {})
-    parser_config = {
-        "chunk_token_num": chunking.get("chunk_token_num", document["chunk_parser_config"].get("chunk_token_num", 512)),
-        "overlapped_percent": chunking.get("overlapped_percent", document["chunk_parser_config"].get("overlapped_percent", 10)),
-        "delimiter": chunking.get("delimiter", document["chunk_parser_config"].get("delimiter", "\\n")),
-    }
+    processing_params = document_processing_params(document, kb_config, params)
+    parser_config = processing_params["chunk_parser_config"]
     blocks = db.get_blocks(document_id)
     if not blocks:
         raise ValueError("文件尚未解析，请先执行解析")
+    db.update_document_processing_params(document_id, processing_params)
     return await _index_document(
         document["file_name"],
         document.get("file_path"),
         document["mime_type"],
         document.get("parser") or "stored-blocks",
         blocks,
-        chunking.get("chunk_preset_id", document["chunk_preset_id"] or "general"),
+        processing_params["chunk_preset_id"],
         parser_config,
         document.get("metadata", {}),
         document.get("knowledge_base_id"),

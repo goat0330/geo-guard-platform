@@ -645,6 +645,20 @@ def update_document_status(document_id: str, status: str, error: str | None = No
             )
 
 
+def update_document_processing_params(document_id: str, params: dict) -> None:
+    with connect() as connection:
+        row = connection.execute("SELECT metadata_json FROM documents WHERE id=?", (document_id,)).fetchone()
+        if not row:
+            raise ValueError("Document not found")
+        metadata = json.loads(row["metadata_json"] or "{}")
+        metadata["processing_params"] = params
+        connection.execute(
+            "UPDATE documents SET chunk_preset_id=?, chunk_parser_config_json=?, metadata_json=?, updated_at=? WHERE id=?",
+            (params["chunk_preset_id"], json.dumps(params["chunk_parser_config"], ensure_ascii=False),
+             json.dumps(metadata, ensure_ascii=False), now_iso(), document_id),
+        )
+
+
 def replace_blocks(document_id: str, blocks: list[dict]) -> None:
     with connect() as connection:
         connection.execute("DELETE FROM blocks WHERE document_id=?", (document_id,))
