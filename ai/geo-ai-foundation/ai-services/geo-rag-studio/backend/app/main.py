@@ -219,7 +219,7 @@ async def health():
 
 @app.post("/api/v1/providers/embedding/test")
 async def test_embedding_provider(request: EmbeddingTestRequest):
-    config = request.model_dump(exclude_none=True)
+    config = request.model_dump(exclude_unset=True)
     if not embedding_enabled(config):
         return JSONResponse(
             status_code=503,
@@ -317,7 +317,7 @@ async def test_parser_provider(
 
 @app.post("/api/v1/providers/reranker/test")
 async def test_reranker_provider(request: RerankerTestRequest):
-    config = request.model_dump(exclude={"query", "documents"})
+    config = request.model_dump(exclude={"query", "documents"}, exclude_unset=True, exclude_none=True)
     protocol = config.get("protocol") or settings.rerank_protocol
     if any(not document.strip() for document in request.documents):
         raise HTTPException(status_code=422, detail="documents 不能包含空文本")
@@ -334,7 +334,7 @@ async def test_reranker_provider(request: RerankerTestRequest):
         return {
             "status": "ok",
             "provider": protocol,
-            "model": config["model"] or settings.rerank_model,
+            "model": config.get("model", settings.rerank_model),
             "document_count": len(request.documents),
             "scores": scores,
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
@@ -596,7 +596,7 @@ async def parse_knowledge_base_documents(knowledge_base_id: str, request: Docume
 
 @app.post("/api/v1/knowledge-bases/{knowledge_base_id}/documents/parse-pending")
 async def parse_pending_knowledge_base_documents(knowledge_base_id: str, params: dict | None = None):
-    items = [doc["id"] for doc in db.list_documents(knowledge_base_id) if doc["status"] in {"uploaded", "failed"}]
+    items = [doc["id"] for doc in db.list_documents(knowledge_base_id) if doc["status"] == "uploaded"]
     return await _process_document_batch(knowledge_base_id, items, "parse", params)
 
 
@@ -607,7 +607,8 @@ async def index_knowledge_base_documents(knowledge_base_id: str, request: Docume
 
 @app.post("/api/v1/knowledge-bases/{knowledge_base_id}/documents/index-pending")
 async def index_pending_knowledge_base_documents(knowledge_base_id: str, params: dict | None = None):
-    items = [doc["id"] for doc in db.list_documents(knowledge_base_id) if doc["status"] == "parsed"]
+    items = [doc["id"] for doc in db.list_documents(knowledge_base_id) if doc["status"] == "parsed"
+             or (doc["status"] == "failed" and (doc.get("metadata") or {}).get("failure_stage") == "index")]
     return await _process_document_batch(knowledge_base_id, items, "index", params)
 
 

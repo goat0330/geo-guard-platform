@@ -628,20 +628,24 @@ def create_document(file_name, file_path, mime_type, parser, preset, parser_conf
 
 def update_document_status(document_id: str, status: str, error: str | None = None, parser: str | None = None) -> None:
     with connect() as connection:
+        row = connection.execute("SELECT status, metadata_json FROM documents WHERE id=?", (document_id,)).fetchone()
+        metadata = json.loads(row["metadata_json"] or "{}") if row else {}
         if error:
-            row = connection.execute(
-                "SELECT metadata_json FROM documents WHERE id=?", (document_id,)
-            ).fetchone()
-            metadata = json.loads(row["metadata_json"] or "{}") if row else {}
             metadata["indexing_error"] = error[:500]
+            if row and row["status"] in {"uploaded", "parsing"}:
+                metadata["failure_stage"] = "parse"
+            elif row and row["status"] in {"parsed", "chunking", "embedding", "indexed"}:
+                metadata["failure_stage"] = "index"
             connection.execute(
                 "UPDATE documents SET status=?, error_message=?, metadata_json=?, parser=COALESCE(?, parser), updated_at=? WHERE id=?",
                 (status, error[:500], json.dumps(metadata, ensure_ascii=False), parser, now_iso(), document_id),
             )
         else:
+            metadata.pop("indexing_error", None)
+            metadata.pop("failure_stage", None)
             connection.execute(
-                "UPDATE documents SET status=?, error_message=NULL, parser=COALESCE(?, parser), updated_at=? WHERE id=?",
-                (status, parser, now_iso(), document_id),
+                "UPDATE documents SET status=?, error_message=NULL, metadata_json=?, parser=COALESCE(?, parser), updated_at=? WHERE id=?",
+                (status, json.dumps(metadata, ensure_ascii=False), parser, now_iso(), document_id),
             )
 
 

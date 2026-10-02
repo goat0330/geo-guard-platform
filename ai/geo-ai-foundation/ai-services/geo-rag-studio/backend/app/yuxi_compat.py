@@ -37,6 +37,16 @@ STAGE_URI = "local-stage://"
 DEFAULT_SHARE_CONFIG = {"version": 2, "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []}, "manage_scope": None}
 
 
+def _yuxi_document_status(document: dict) -> str:
+    status = document.get("status", "uploaded")
+    if status in {"chunking", "embedding"}:
+        return "indexing"
+    if status == "failed":
+        phase = (document.get("metadata") or {}).get("failure_stage")
+        return {"parse": "error_parsing", "index": "error_indexing"}.get(phase, status)
+    return status
+
+
 def _yuxi_document(document: dict) -> dict:
     metadata = document.get("metadata") or {}
     file_path = Path(document.get("file_path") or "")
@@ -54,7 +64,7 @@ def _yuxi_document(document: dict) -> dict:
         "mime_type": document.get("mime_type"),
         "file_size": file_size,
         "size": file_size,
-        "status": document.get("status", "uploaded"),
+        "status": _yuxi_document_status(document),
         "parser": document.get("parser"),
         "chunk_preset_id": document.get("chunk_preset_id"),
         "processing_params": metadata.get("processing_params") or {
@@ -91,14 +101,17 @@ def _yuxi_folder(folder: dict) -> dict:
 
 def _kb_stats(knowledge_base_id: str) -> dict:
     documents = db.list_documents(knowledge_base_id)
+    folders = db.list_folders(knowledge_base_id)
     total_size = sum(int((item.get("metadata") or {}).get("file_size") or 0) for item in documents)
-    status_counts = {status: sum(item.get("status") == status for item in documents) for status in ("uploaded", "parsing", "parsed", "chunking", "embedding", "indexed", "failed")}
+    status_counts = {status: sum(_yuxi_document_status(item) == status for item in documents)
+                     for status in ("uploaded", "parsing", "parsed", "indexing", "indexed", "error_parsing", "error_indexing", "failed")}
     return {
-        "file_count": len(documents), "row_count": len(documents), "total_size": total_size,
+        "file_count": len(documents), "folder_count": len(folders), "row_count": len(documents) + len(folders), "total_size": total_size,
         "chunk_count": sum(item.get("chunk_count", 0) for item in documents),
         "token_count": sum(item.get("token_count", 0) for item in documents),
         "pending_parse_count": status_counts["uploaded"],
-        "processing_count": status_counts["parsing"] + status_counts["chunking"] + status_counts["embedding"],
+        "pending_index_count": status_counts["parsed"] + status_counts["error_indexing"],
+        "processing_count": status_counts["parsing"] + status_counts["indexing"],
         "status_counts": status_counts,
     }
 
@@ -369,14 +382,13 @@ async def yuxi_list_external_files(
     normalized_query = (query or "").strip().casefold()
     accepted_statuses = {
         "indexed": {"indexed", "done"},
-        "error_indexing": {"error_indexing", "failed"},
     }.get(status, None if status == "all" else {status})
     documents = db.list_documents(kb_id)
     files = []
     for document in documents:
         if normalized_query and normalized_query not in document["file_name"].casefold():
             continue
-        if accepted_statuses is not None and document["status"] not in accepted_statuses:
+        if accepted_statuses is not None and _yuxi_document_status(document) not in accepted_statuses:
             continue
         public_document = _yuxi_document(document)
         files.append(
@@ -386,9 +398,9 @@ async def yuxi_list_external_files(
                 "file_id": document["id"],
                 "filename": document["file_name"],
                 "file_type": public_document["file_type"],
-                "status": document["status"],
+                "status": public_document["status"],
                 "created_at": document.get("created_at"),
-                "updated_at": document.get("created_at"),
+                "updated_at": document.get("updated_at"),
                 "file_size": public_document["file_size"],
                 "is_folder": False,
                 "parent_id": document.get("folder_id"),
@@ -728,8 +740,7 @@ async def yuxi_list_documents(
     recursive = recursive and status != "all"
     documents = db.list_documents(knowledge_base_id)
     if status != "all":
-        selected_statuses = {"failed", "error_indexing"} if status == "error_indexing" else {status}
-        documents = [item for item in documents if item.get("status") in selected_statuses]
+        documents = [item for item in documents if _yuxi_document_status(item) == status]
     if parent_id and not recursive:
         documents = [item for item in documents if item.get("folder_id") == parent_id]
     elif not recursive:

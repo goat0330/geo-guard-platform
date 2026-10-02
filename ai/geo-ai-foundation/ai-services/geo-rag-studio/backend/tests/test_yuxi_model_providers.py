@@ -32,12 +32,18 @@ def test_yuxi_builtin_embedding_selector_resolves_upstream_spec(tmp_path, monkey
     assert runtime["base_url"] == "https://api.siliconflow.cn/v1/embeddings"
     assert runtime["dimensions"] == 1024
     assert runtime["api_key"] == ""
+    monkeypatch.setattr(settings, "embedding_api_key", "unit-global-secret")
+    from app.embedding import enabled as embedding_enabled
+    assert embedding_enabled({"model": spec}) is False
 
     reranker_spec = "siliconflow-cn:Pro/BAAI/bge-reranker-v2-m3"
     reranker = resolve_runtime_config({"model": reranker_spec}, "rerank")
     assert reranker["model"] == "Pro/BAAI/bge-reranker-v2-m3"
     assert reranker["base_url"] == "https://api.siliconflow.cn/v1/rerank"
     assert reranker["api_key"] == ""
+    monkeypatch.setattr(settings, "rerank_api_key", "unit-global-secret")
+    from app.yuxi_port.rerank import enabled as reranker_enabled
+    assert reranker_enabled({"model": reranker_spec}) is False
 
     status = client.get("/api/system/model-providers/models/status", params={"spec": spec})
     assert status.status_code == 200

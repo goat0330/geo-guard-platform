@@ -11,8 +11,7 @@ from yuxi.models.rerank import DashscopeReranker, OpenAIReranker, sigmoid
 
 
 def _value(config: dict | None, key: str, fallback):
-    configured = (config or {}).get(key)
-    return configured if configured not in (None, "") else fallback
+    return config[key] if config is not None and key in config else fallback
 
 
 def enabled(config: dict | None = None) -> bool:

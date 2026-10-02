@@ -124,6 +124,60 @@ def test_add_uploaded_documents_reports_native_partial_failure(tmp_path, monkeyp
     assert "source_paths" not in params and "auto_index" not in params
 
 
+def test_native_document_statistics_include_folders_and_pending_index(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "待入库统计", "kb_type": "local"}).json()["kb_id"]
+    client.post(f"/api/knowledge/databases/{kb_id}/folders", json={"folder_name": "资料"})
+    staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
+                         files={"file": ("巡查.txt", "降雨后巡查坡体裂缝".encode(), "text/plain")}).json()
+    added = client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]]}).json()
+    doc_id = added["processed"][0]["file_id"]
+    stats = client.get(f"/api/knowledge/databases/{kb_id}").json()["stats"]
+    assert stats["row_count"] == 2 and stats["file_count"] == stats["folder_count"] == 1
+    assert stats["pending_parse_count"] == 0 and stats["pending_index_count"] == 1
+    indexed = client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [doc_id]})
+    assert indexed.json()["failed"] == []
+    assert client.get(f"/api/knowledge/databases/{kb_id}").json()["stats"]["pending_index_count"] == 0
+
+
+def test_native_failure_states_preserve_phase_and_recover_without_stale_errors(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "失败阶段", "kb_type": "local"}).json()["kb_id"]
+    bad = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
+                      files={"file": ("broken.pdf", b"%PDF-invalid", "application/pdf")}).json()
+    doc_id = client.post(f"/api/knowledge/databases/{kb_id}/documents/add",
+                         json={"items": [bad["file_path"]]}).json()["items"][0]["file_id"]
+    parsed = client.post(f"/api/knowledge/databases/{kb_id}/documents/parse", json={"file_ids": [doc_id]})
+    assert len(parsed.json()["failed"]) == 1
+    assert db.get_document(doc_id)["status"] == "failed"
+    basic_url = f"/api/knowledge/databases/{kb_id}/documents/{doc_id}/basic"
+    assert client.get(basic_url).json()["status"] == "error_parsing"
+    parse_errors = client.get(f"/api/knowledge/databases/{kb_id}/documents", params={"status": "error_parsing"}).json()
+    assert [item["file_id"] for item in parse_errors["items"]] == [doc_id]
+    assert client.get(f"/api/knowledge/databases/{kb_id}/documents", params={"status": "error_indexing"}).json()["total"] == 0
+    assert client.get(f"/api/knowledge/databases/{kb_id}").json()["stats"]["pending_index_count"] == 0
+
+    staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
+                         files={"file": ("巡查.txt", "巡查裂缝和位移".encode(), "text/plain")}).json()
+    indexed_id = client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]]}).json()["processed"][0]["file_id"]
+    from app import pipeline
+    async def fail_embedding(*args):
+        raise RuntimeError("Unit test embedding failure")
+    with monkeypatch.context() as failure:
+        failure.setattr(pipeline, "_embed_chunks", fail_embedding)
+        result = client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [indexed_id]})
+    assert len(result.json()["failed"]) == 1
+    assert db.get_document(indexed_id)["metadata"]["failure_stage"] == "index"
+    assert client.get(f"/api/knowledge/databases/{kb_id}/documents/{indexed_id}/basic").json()["status"] == "error_indexing"
+    assert client.get(f"/api/knowledge/databases/{kb_id}").json()["stats"]["pending_index_count"] == 1
+    retry = client.post(f"/api/knowledge/databases/{kb_id}/documents/index-pending", json={})
+    assert retry.json()["failed"] == []
+    assert [item["document_id"] for item in retry.json()["processed"]] == [indexed_id]
+    doc = db.get_document(indexed_id)
+    assert doc["status"] == "indexed" and doc["error_message"] is None
+    assert "indexing_error" not in doc["metadata"] and "failure_stage" not in doc["metadata"]
+
+
 def test_yuxi_workspace_tree_create_and_reject_traversal(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     workspace = Path(settings.rag_workspace_dir)

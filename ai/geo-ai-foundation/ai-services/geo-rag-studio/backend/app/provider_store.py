@@ -238,6 +238,11 @@ def resolve_runtime_config(config: dict | None, model_type: str) -> dict:
     spec = str(config.get("model") or "")
     resolved = resolve_model_spec(spec, model_type)
     if not resolved:
+        # A scoped KB config supplies its own provider identity. Never combine
+        # its endpoint/model with a global credential (or the reverse).
+        if config and model_type in {"embedding", "rerank"}:
+            for key in ("base_url", "model", "api_key"):
+                config.setdefault(key, "")
         return config
     # Yuxi model selectors persist provider_id:model_id; the provider record supplies
     # the endpoint and credentials while the pipeline sends the upstream model id.
