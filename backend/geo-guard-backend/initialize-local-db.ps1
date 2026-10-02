@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$PostgreSqlBin,
-    [int]$Port = 15432
+    [int]$Port = 15432,
+    [switch]$ApplyLocalViews
 )
 $ErrorActionPreference = 'Stop'
 $backendRoot = $PSScriptRoot
@@ -59,6 +60,12 @@ try {
         Write-Host 'Local empty business schema initialized. No accounts or business records were imported.'
     } else {
         Write-Host "Existing database preserved ($tableCount tables); schema was not reapplied."
+        if ($ApplyLocalViews) {
+            & $psql -h 127.0.0.1 -p $Port -U geo_guard -d geo_guard -q -v ON_ERROR_STOP=1 --single-transaction `
+                -f (Join-Path $backendRoot 'database\003-local-business-views.sql')
+            if ($LASTEXITCODE -ne 0) { throw 'Local view migration failed and was rolled back.' }
+            Write-Host 'Local storage tables and live business views installed; existing records preserved.'
+        }
     }
     & $psql -h 127.0.0.1 -p $Port -U geo_guard -d geo_guard -c "SELECT current_database(), postgis_version();"
     if ($LASTEXITCODE -ne 0) { throw 'PostGIS verification failed.' }

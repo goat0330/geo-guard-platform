@@ -28,7 +28,7 @@ chongqing-geological-disaster-start/target/chongqing-geological-disaster-start.j
 .\initialize-local-db.ps1 -PostgreSqlBin 'D:\PostgreSQL\18\bin'
 ```
 
-默认数据库位于 `127.0.0.1:15432`。结构包含 94 个业务/系统表，不导入旧业务数据或用户账号；脚本已完成全新集群初始化验证。详见 `database/README.md`。数据库密码通过 `GEO_DB_PASSWORD` 注入，或使用初始化脚本生成的 `.runtime/postgres-password.txt`，勿放入源码或命令行。
+默认数据库位于 `127.0.0.1:15432`。结构包含 103 个业务/系统表和 11 个业务视图，不导入旧业务数据或用户账号；结构已完成全新空库初始化验证。详见 `database/README.md`。数据库密码通过 `GEO_DB_PASSWORD` 注入，或使用初始化脚本生成的 `.runtime/postgres-password.txt`，勿放入源码或命令行。
 
 本地业务 Redis 使用独立容器，默认仅绑定 `127.0.0.1:26379`，AOF 数据位于项目 `.runtime/redis-data`。不依赖 Yuxi 的 Redis 或完整 Docker Compose。先启动 Docker Engine，导入缓存的 `redis:7.4.10-alpine` 镜像，再运行下面的脚本；初始化脚本不会自动下载镜像。离线部署可以预先 `docker save` / `docker load` 该镜像。外部 Redis 可通过 `GEO_REDIS_HOST`、`GEO_REDIS_PORT`、`SPRING_DATA_REDIS_PASSWORD` 设置。
 
@@ -56,7 +56,7 @@ Dify 知识库文件下载通过 Java 服务端代理，使用 `dizai.dify.knowl
 - 使用完整离线构建包在干净源码副本构建；临时屏蔽系统 Java/Maven 路径，确认使用包内 Temurin JDK 21 和 Maven。
 - `-o -B verify`：33 个 reactor 模块成功，48 个测试套件、387 项测试，失败 0、错误 0、跳过 0。
 - Maven 可执行包构建通过；JAR 内含 Spring Boot launcher、启动类和业务依赖。实际运行依赖用户提供的数据库、Redis 和配置。
-- PostgreSQL 18.4 / PostGIS 3.6.2：94 个业务/系统表在全新集群初始化成功；再次运行脚本保留已有表。Redis 7.4.10 返回 `PONG`，数据位于 D 盘。
+- PostgreSQL 18.4 / PostGIS 3.6.2：103 个业务/系统表和 11 个视图在全新空库初始化成功；再次运行脚本保留已有表。新增视图的事务测试验证本地记录、空间关联、更新与空坐标，测试记录全部回滚；10 个对应 Java 列表接口返回 HTTP 200 / code 200（业务数据尚未录入）。Redis 7.4.10 返回 `PONG`，数据位于 D 盘。
 - 完整业务 JAR 使用包内 JDK 21 启动并监听 `:8007`；真实认证 smoke 的 19 项断言通过，包含验证码、Redis 有效期与不可复用、错误密码、管理员登录、用户信息、客户端 ID、退出和退出后拒绝。
 - 最新离线目标构建：33 个 reactor 模块成功，8 项 async/匿名日志/multipart/PDF 代理回归测试通过。此前 387 项全量结果是历史完整构建结果，未在每次局部修复后重跑。
 - 真实 Java → RAG PDF 验收：上传 1,528,947 字节、49 页、1008 个版面块及 bbox、38 个分块；BM25 38 条候选、5 条 Evidence、Final Context 3342 字符。原文预览保持字节一致，仅返回 `application/pdf`，带 Yuxi PDF 预览标识；5 个证据框均在 PDF 页面内且框内能提取原文。未配置 Embedding/Reranker/MinerU 时测试返回 503 unavailable，Vector/Rerank 未执行。
