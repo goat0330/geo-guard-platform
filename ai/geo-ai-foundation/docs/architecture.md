@@ -30,4 +30,4 @@ Evidence 不足时最多补检一次。字段 evidence 状态使用精确原文�
 
 ## 当前能力边界
 
-E 盘 Yuxi 的 chunk preset contract、参数边界、recall_top_k、rerank index-score 对齐、MinerU 请求形状等模式已做小范围重实现。当前数据库仍为本地 SQLite；线上 Embedding、Reranker、MinerU OCR 与 LLM 地址/凭证没有随 ZIP 提供，需要用户配置后才能跑真实的 Vector、Rerank、OCR 和生成结果。
+Yuxi v0.7.3 的 chunk preset、切块器、OCR/parser、embedding/reranker 协议和检索配置数据类已直接迁入并由 Geo API 适配调用；检索配置界面从上游 `MilvusRetrievalConfig` 读取字段和参数边界。Geo 自己的 SQLite/文件层保存文档和 Evidence 定位，并可使用独立 Milvus 索引。Yuxi 的 `MilvusKB` 依赖其 PostgreSQL 仓储、模型注册表和 MinIO 解析文件，当前没有直接作为运行时类使用，因此后端不是全量行为等价。线上 Embedding、Reranker、MinerU OCR 与 LLM 地址/凭证没有随 ZIP 提供；真实 PDF 的 BM25 流程已验证，Vector、Rerank、OCR 与生成能力仍须配置 Provider 后验证。
