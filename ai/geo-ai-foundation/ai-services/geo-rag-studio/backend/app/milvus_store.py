@@ -204,6 +204,21 @@ async def upsert_document(
     )
 
 
+def _delete_document_sync(knowledge_base_id: str, document_id: str) -> None:
+    from pymilvus import Collection, utility
+
+    alias = _connect()
+    name = collection_name(knowledge_base_id)
+    if utility.has_collection(name, using=alias):
+        collection = Collection(name=name, using=alias)
+        collection.delete(expr=f"file_id == {json.dumps(document_id)}")
+        collection.flush()
+
+
+async def delete_document(knowledge_base_id: str, document_id: str) -> None:
+    await asyncio.to_thread(_delete_document_sync, knowledge_base_id, document_id)
+
+
 def _search_sync(
     knowledge_base_id: str,
     query: str,

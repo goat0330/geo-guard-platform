@@ -27,6 +27,82 @@ def _client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
+def test_native_delete_folder_recurses_and_reports_partial_failures(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "删除契约测试", "kb_type": "local"}).json()["kb_id"]
+    root = client.post(f"/api/knowledge/databases/{kb_id}/folders", json={"folder_name": "root"}).json()["file_id"]
+    child = client.post(f"/api/knowledge/databases/{kb_id}/folders", json={"folder_name": "child", "parent_id": root}).json()["file_id"]
+    staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
+                         files={"file": ("删除样本.txt", "巡查裂缝与降雨。".encode(), "text/plain")}).json()
+    added = client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]], "params": {"auto_index": True}}).json()
+    doc_id = added["processed"][0]["document_id"]
+    assert db.get_chunks(doc_id)
+    source_path = Path(db.get_document(doc_id)["file_path"])
+    assert source_path.is_file()
+    assert client.put(f"/api/knowledge/databases/{kb_id}/documents/{doc_id}/move", json={"new_parent_id": child}).status_code == 200
+    deleted = client.request("DELETE", f"/api/knowledge/databases/{kb_id}/documents/batch", json=[root, "missing-fixture"])
+    assert deleted.status_code == 200, deleted.text
+    result = deleted.json()
+    assert result["deleted_count"] == 1
+    assert result["failed_items"] == [{"doc_id": "missing-fixture", "error": "文件不存在"}]
+    assert "部分删除成功" in result["message"]
+    assert db.list_folders(kb_id) == []
+    assert db.get_document(doc_id) is None
+    assert db.get_chunks(doc_id) == []
+    assert not source_path.exists()
+    assert client.get(f"/api/knowledge/databases/{kb_id}").json()["stats"]["row_count"] == 0
+    failed = client.request("DELETE", f"/api/knowledge/databases/{kb_id}/documents/batch", json=["missing-fixture"])
+    assert failed.status_code == 400
+
+
+def test_native_single_folder_delete_and_basic_info(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "文件夹元数据", "kb_type": "local"}).json()["kb_id"]
+    folder = client.post(f"/api/knowledge/databases/{kb_id}/folders", json={"folder_name": "empty"}).json()
+    folder_id = folder["file_id"]
+    basic = client.get(f"/api/knowledge/databases/{kb_id}/documents/{folder_id}/basic")
+    assert basic.status_code == 200
+    assert basic.json()["is_folder"] is True
+    result = client.delete(f"/api/knowledge/databases/{kb_id}/documents/{folder_id}")
+    assert result.status_code == 200
+    assert result.json()["message"] == "文件夹删除成功"
+    assert db.list_folders(kb_id) == []
+
+
+@pytest.mark.parametrize("index_failure", [False, True])
+def test_native_delete_cleans_index_before_metadata(tmp_path, monkeypatch, index_failure):
+    from app import milvus_store
+
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "索引删除顺序", "kb_type": "local"}).json()["kb_id"]
+    staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
+                         files={"file": ("索引样本.txt", b"slope inspection", "text/plain")}).json()
+    added = client.post(f"/api/knowledge/databases/{kb_id}/documents/add", json={"items": [staged["file_path"]]}).json()
+    doc_id = added["items"][0]["file_id"]
+    source_path = Path(db.get_document(doc_id)["file_path"])
+    called = []
+
+    async def delete_index(knowledge_base_id, document_id):
+        assert db.get_document(document_id) is not None
+        called.append((knowledge_base_id, document_id))
+        if index_failure:
+            raise RuntimeError("Unit test index unavailable")
+
+    monkeypatch.setattr(settings, "rag_search_backend", "milvus")
+    monkeypatch.setattr(milvus_store, "delete_document", delete_index)
+    result = client.request("DELETE", f"/api/knowledge/databases/{kb_id}/documents/batch", json=[doc_id])
+    assert called == [(kb_id, doc_id)]
+    if index_failure:
+        assert result.status_code == 400
+        assert db.get_document(doc_id) is not None
+        assert source_path.is_file()
+    else:
+        assert result.status_code == 200
+        assert result.json()["deleted_count"] == 1
+        assert db.get_document(doc_id) is None
+        assert not source_path.exists()
+
+
 def test_add_uploaded_document_preserves_uploaded_state(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     kb_id = client.post("/api/knowledge/databases", json={"database_name": "仅添加文件", "kb_type": "local"}).json()["kb_id"]

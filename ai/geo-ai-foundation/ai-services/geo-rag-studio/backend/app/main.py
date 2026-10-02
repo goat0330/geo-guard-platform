@@ -17,7 +17,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from . import db
+from . import db, milvus_store
 from .config import settings
 from .embedding import embed_texts, enabled as embedding_enabled, value as embedding_value
 from .parser import parse_pdf_layout, parse_pdf_mineru, parse_pdf_mineru_official, render_pdf_page
@@ -558,18 +558,18 @@ async def batch_delete_knowledge_base_documents(knowledge_base_id: str, request:
     _knowledge_base_or_404(knowledge_base_id)
     deleted = []
     missing = []
-    upload_root = Path(settings.rag_upload_dir).resolve()
+    failures = []
     for document_id in dict.fromkeys(request.document_ids):
         document = db.get_document(document_id)
         if not document or document["knowledge_base_id"] != knowledge_base_id:
             missing.append(document_id)
             continue
-        removed = db.delete_document(document_id)
-        file_path = Path(removed.get("file_path") or "").resolve()
-        if file_path.is_file() and file_path.is_relative_to(upload_root):
-            file_path.unlink()
-        deleted.append(document_id)
-    return {"deleted": deleted, "not_found": missing}
+        try:
+            await delete_knowledge_base_document(knowledge_base_id, document_id)
+            deleted.append(document_id)
+        except Exception as exc:
+            failures.append({"document_id": document_id, "error_message": str(exc)[:500]})
+    return {"deleted": deleted, "not_found": missing, "failed": failures}
 
 
 async def _process_document_batch(knowledge_base_id: str, document_ids: list[str], operation: str, params: dict | None = None):
@@ -1210,6 +1210,8 @@ async def delete_knowledge_base_document(knowledge_base_id: str, document_id: st
     document = db.get_document(document_id)
     if not document or document["knowledge_base_id"] != knowledge_base_id:
         raise HTTPException(status_code=404, detail="Document not found")
+    if settings.rag_search_backend == "milvus":
+        await milvus_store.delete_document(knowledge_base_id, document_id)
     deleted = db.delete_document(document_id)
     file_path = Path(deleted.get("file_path") or "").resolve()
     upload_root = Path(settings.rag_upload_dir).resolve()

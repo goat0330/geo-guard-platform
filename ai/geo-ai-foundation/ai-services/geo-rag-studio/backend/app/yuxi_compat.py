@@ -810,7 +810,18 @@ async def yuxi_rename_folder(knowledge_base_id: str, folder_id: str, payload: di
 
 @router.delete("/api/knowledge/databases/{knowledge_base_id}/folders/{folder_id}")
 async def yuxi_delete_folder(knowledge_base_id: str, folder_id: str):
-    return await rag.remove_folder(knowledge_base_id, folder_id)
+    rag._knowledge_base_or_404(knowledge_base_id)
+    if not db.folder_exists(folder_id, knowledge_base_id):
+        raise HTTPException(status_code=404, detail="文件夹不存在")
+    # Match KnowledgeBase.delete_folder: remove descendants before the folder.
+    for folder in db.list_folders(knowledge_base_id):
+        if folder.get("parent_id") == folder_id:
+            await yuxi_delete_folder(knowledge_base_id, folder["id"])
+    for document in db.list_documents(knowledge_base_id):
+        if document.get("folder_id") == folder_id:
+            await rag.delete_knowledge_base_document(knowledge_base_id, document["id"])
+    await rag.remove_folder(knowledge_base_id, folder_id)
+    return {"message": "文件夹删除成功"}
 
 
 @router.put("/api/knowledge/databases/{knowledge_base_id}/documents/{document_id}/move")
@@ -1425,6 +1436,10 @@ async def yuxi_index_pending(knowledge_base_id: str, payload: dict = Body(defaul
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}/documents/{document_id}/basic")
 async def yuxi_get_document_basic(knowledge_base_id: str, document_id: str):
+    rag._knowledge_base_or_404(knowledge_base_id)
+    folder = next((item for item in db.list_folders(knowledge_base_id) if item["id"] == document_id), None)
+    if folder:
+        return _yuxi_folder(folder)
     document = db.get_document(document_id)
     if not document or document.get("knowledge_base_id") != knowledge_base_id:
         raise HTTPException(status_code=404, detail="文件不存在")
@@ -1568,13 +1583,35 @@ async def yuxi_get_kb_image(knowledge_base_id: str, object_path: str):
 
 @router.delete("/api/knowledge/databases/{knowledge_base_id}/documents/batch")
 async def yuxi_batch_delete_documents(knowledge_base_id: str, payload: list[str] = Body(...)):
-    result = await rag.batch_delete_knowledge_base_documents(knowledge_base_id, DocumentBatchPayload(document_ids=payload))
-    return {"deleted_count": len(result["deleted"]), "failed_items": result["not_found"], **result}
+    rag._knowledge_base_or_404(knowledge_base_id)
+    deleted_count = 0
+    failed_items = []
+    for document_id in payload:
+        try:
+            await yuxi_delete_document(knowledge_base_id, document_id)
+            deleted_count += 1
+        except HTTPException as exc:
+            failed_items.append({"doc_id": document_id, "error": str(exc.detail)})
+        except Exception as exc:
+            failed_items.append({"doc_id": document_id, "error": str(exc)[:500]})
+    if failed_items:
+        if deleted_count == 0:
+            raise HTTPException(status_code=400, detail=f"批量删除失败: 所有 {len(failed_items)} 个文件均未删除。")
+        return {"message": f"部分删除成功: 已删除 {deleted_count} 个文件，失败 {len(failed_items)} 个",
+                "deleted_count": deleted_count, "failed_items": failed_items}
+    return {"message": f"批量删除成功: 已删除 {deleted_count} 个文件", "deleted_count": deleted_count}
 
 
 @router.delete("/api/knowledge/databases/{knowledge_base_id}/documents/{document_id}")
 async def yuxi_delete_document(knowledge_base_id: str, document_id: str):
-    return await rag.delete_knowledge_base_document(knowledge_base_id, document_id)
+    rag._knowledge_base_or_404(knowledge_base_id)
+    if db.folder_exists(document_id, knowledge_base_id):
+        return await yuxi_delete_folder(knowledge_base_id, document_id)
+    document = db.get_document(document_id)
+    if not document or document.get("knowledge_base_id") != knowledge_base_id:
+        raise HTTPException(status_code=400, detail="文件不存在")
+    await rag.delete_knowledge_base_document(knowledge_base_id, document_id)
+    return {"message": "删除成功"}
 
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}/documents/{document_id}")
