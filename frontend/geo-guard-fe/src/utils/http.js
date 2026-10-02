@@ -13,8 +13,7 @@ const instance = axios.create({
   timeout: 180000,
   headers: {
     'Content-Type': 'application/json;charset=utf-8',
-    // clientId为固定值
-    // clientId: import.meta.env.VITE_APP_CLIENT_ID,
+    clientid: import.meta.env.VITE_APP_CLIENT_ID || 'geo-local',
   },
 })
 

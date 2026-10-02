@@ -285,7 +285,7 @@
 <script setup>
 import { ref, computed, onMounted, watch, h } from 'vue'
 import { message, Upload, Modal } from 'ant-design-vue'
-import { useUserStore } from '@/stores/user'
+import { getApiAuthHeaders } from '@/apis/base'
 import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
 import { fileApi, documentApi } from '@/apis/knowledge_api'
@@ -1050,6 +1050,9 @@ const runUploadTask = (task) => {
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const response = JSON.parse(xhr.responseText)
+          if (Number.isInteger(response?.code) && response.code >= 400) {
+            throw new Error(response.code === 401 ? '登录已过期，请重新登录' : `文件上传失败：${response.code}`)
+          }
           if (fileUid) {
             uploadTaskStatus.value[fileUid] = 'done'
             uploadTaskProgress.value[fileUid] = 100
@@ -1130,8 +1133,7 @@ const handleDrop = () => {}
 // 已移除文件夹上传逻辑
 
 const getAuthHeaders = () => {
-  const userStore = useUserStore()
-  return userStore.getAuthHeaders()
+  return getApiAuthHeaders(fileApi.getUploadUrl(kbId.value))
 }
 
 const openDocLink = () => {

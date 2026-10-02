@@ -64,6 +64,41 @@ test('公开登录 401 保留服务端错误且不清理当前会话', async () 
   })
 })
 
+test('嵌入知识库使用宿主令牌且 Java 401 不触发第二套 Yuxi 登录', async () => {
+  await withServer(async (server) => {
+    storageValues.set('bwy-token', 'host-session')
+    storageValues.set('user_token', 'yuxi-session')
+    globalThis.__apiBoundaryMessages = []
+    globalThis.window = {
+      location: { href: '/yuxi/?embed=rag', search: '?embed=rag', origin: 'http://localhost' },
+      localStorage: globalThis.localStorage
+    }
+    globalThis.fetch = async (url, options) => {
+      assert.equal(options.headers['bwy-token'], 'host-session')
+      assert.equal(options.headers.clientid, 'geo-local')
+      assert.equal(options.headers.Authorization, undefined)
+      return new Response(JSON.stringify({ code: 401, msg: 'private token context' }), {
+        status: 200, headers: { 'content-type': 'application/json' }
+      })
+    }
+    const { apiGet, getApiAuthHeaders } = await server.ssrLoadModule('/src/apis/base.js')
+    assert.deepEqual(getApiAuthHeaders('/api/knowledge/databases/kb_test/files/upload'), {
+      'bwy-token': 'host-session', clientid: 'geo-local'
+    })
+    for (const type of ['json', 'blob']) {
+      await assert.rejects(apiGet('/api/knowledge/databases', {}, true, type), (error) => {
+        assert.equal(error.status, 401)
+        assert.equal(error.message, '登录已过期，请重新登录')
+        assert.equal(JSON.stringify(error.response).includes('private token context'), false)
+        return true
+      })
+    }
+    assert.equal(window.location.href, '/yuxi/?embed=rag')
+    assert.equal(storageValues.get('user_token'), 'yuxi-session')
+    assert.deepEqual(globalThis.__apiBoundaryMessages, [])
+  })
+})
+
 test('登录 423 保留锁定状态、文案和剩余时间响应头', async () => {
   await withServer(async (server) => {
     globalThis.fetch = async () =>

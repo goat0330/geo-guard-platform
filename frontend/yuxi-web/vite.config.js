@@ -57,6 +57,11 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           rewrite: (path) => `/dizai/ai/rag${path}`
         },
+        '^/api/workspace': {
+          target: env.VITE_API_URL || 'http://127.0.0.1:8007',
+          changeOrigin: true,
+          rewrite: (path) => `/dizai/ai/rag${path}`
+        },
         '^/api': {
           target: env.VITE_API_URL || 'http://127.0.0.1:8007',
           changeOrigin: true,

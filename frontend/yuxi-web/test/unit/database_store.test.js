@@ -76,6 +76,40 @@ test('从二级目录点击全部文件会清空 parent_id 并返回根目录', 
   }
 })
 
+test('嵌入式 RAG 不依赖 Yuxi 登录用户加载知识库', async (t) => {
+  const previousWindow = globalThis.window
+  globalThis.window = { location: { search: '?embed=rag', origin: 'http://localhost' } }
+  const server = await createServer({
+    server: { middlewareMode: true, hmr: false },
+    appType: 'custom'
+  })
+
+  try {
+    const pinia = createPinia()
+    const app = createApp({})
+    app.use(pinia)
+    app.use(createRouter({ history: createMemoryHistory(), routes: [] }))
+    setActivePinia(pinia)
+    const { databaseApi } = await server.ssrLoadModule('/src/apis/knowledge_api.js')
+    const { useDatabaseStore } = await server.ssrLoadModule('/src/stores/database.js')
+    t.mock.method(databaseApi, 'getDatabases', async () => ({ databases: [{ kb_id: 'kb_1' }] }))
+    t.mock.method(databaseApi, 'getAccessibleDatabases', async () => {
+      throw new Error('embedded RAG must not require a signed-in user')
+    })
+
+    const store = app.runWithContext(() => useDatabaseStore())
+    await store.loadDatabases()
+
+    assert.deepEqual(store.databases, [{ kb_id: 'kb_1' }])
+    assert.equal(store.state.listLoading, false)
+    store.stopAutoRefresh()
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+    await server.close()
+  }
+})
+
 test('知识库提交跨账号返回时，不把旧入队任务登记给新账号', async (t) => {
   const server = await createServer({
     server: { middlewareMode: true, hmr: false },

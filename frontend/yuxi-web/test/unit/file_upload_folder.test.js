@@ -35,6 +35,13 @@ test('FileUploadModal 收集相对路径 source_paths 并过滤隐藏文件', ()
   assert.match(source, /Upload\.LIST_IGNORE/)
 })
 
+test('FileUploadModal 原生上传使用知识库请求认证并校验 Java 错误码', () => {
+  const source = readSource('../../src/components/FileUploadModal.vue')
+  assert.match(source, /getApiAuthHeaders\(fileApi\.getUploadUrl\(kbId\.value\)\)/)
+  assert.match(source, /response\.code\s*>=\s*400/)
+  assert.doesNotMatch(source, /useUserStore/)
+})
+
 test('FileUploadModal 文件数量与进度统计仅计算受支持且非隐藏的文件', () => {
   const source = readSource('../../src/components/FileUploadModal.vue')
 

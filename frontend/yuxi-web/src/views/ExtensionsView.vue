@@ -1,7 +1,7 @@
 <template>
   <div class="extensions-view extension-page-root">
     <PageHeader
-      v-if="!isDetailPage"
+      v-if="!isDetailPage && !isEmbeddedRag"
       v-model:active-key="activeTab"
       title="智能体扩展"
       :tabs="extensionTabs"
@@ -11,7 +11,7 @@
     />
 
     <div v-if="!isDetailPage" class="extensions-content">
-      <div v-if="userStore.isAdmin && activeTab === 'knowledge'" class="tab-panel">
+      <div v-if="(isEmbeddedRag || userStore.isAdmin) && activeTab === 'knowledge'" class="tab-panel">
         <DataBaseView ref="knowledgeRef" embedded />
       </div>
       <div v-if="userStore.isAdmin && activeTab === 'tools'" class="tab-panel">
@@ -38,10 +38,12 @@ import SkillCardList from '@/components/extensions/SkillCardList.vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import DataBaseView from '@/views/DataBaseView.vue'
 import { useUserStore } from '@/stores/user'
+import { isEmbeddedRagMode } from '@/utils/embeddedRag'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const isEmbeddedRag = isEmbeddedRagMode()
 const activeTab = ref(null)
 const knowledgeRef = ref(null)
 const skillsRef = ref(null)
@@ -56,7 +58,7 @@ const adminExtensionTabs = computed(() => [
 ])
 const userExtensionTabs = [{ key: 'skills', label: '技能' }]
 const extensionTabs = computed(() =>
-  userStore.isAdmin ? adminExtensionTabs.value : userExtensionTabs
+  isEmbeddedRag ? [{ key: 'knowledge', label: '知识库' }] : userStore.isAdmin ? adminExtensionTabs.value : userExtensionTabs
 )
 const allowedTabKeys = computed(() => extensionTabs.value.map((tab) => tab.key))
 const defaultTabKey = computed(() => extensionTabs.value[0]?.key || 'skills')

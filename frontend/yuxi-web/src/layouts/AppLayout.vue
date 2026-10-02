@@ -32,6 +32,7 @@ import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import GlobalSearchModal from '@/components/GlobalSearchModal.vue'
 import { searchWorkspaceFiles } from '@/apis/workspace_api'
 import { projectApi } from '@/apis/project_api'
+import { isEmbeddedRagMode } from '@/utils/embeddedRag'
 
 const configStore = useConfigStore()
 const agentStore = useAgentStore()
@@ -42,6 +43,7 @@ const infoStore = useInfoStore()
 const projectsStore = useProjectsStore()
 const taskerStore = useTaskerStore()
 const userStore = useUserStore()
+const isEmbeddedRag = isEmbeddedRagMode()
 const { activeCount: activeCountRef, isDrawerOpen } = storeToRefs(taskerStore)
 const { projects, isLoading: projectsLoading, error: projectsError } = storeToRefs(projectsStore)
 const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads, threadCreationInFlight } =
@@ -107,6 +109,7 @@ const handleGlobalKeydown = (e) => {
 }
 
 onMounted(() => {
+  if (isEmbeddedRag) return
   window.addEventListener('keydown', handleGlobalKeydown)
   // 各 Store 自行处理错误，导航不等待无依赖的品牌、知识库或配置请求。
   void infoStore.loadInfoConfig()
@@ -365,8 +368,8 @@ provide('settingsModal', {
 </script>
 
 <template>
-  <div class="app-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
-    <div class="header">
+  <div class="app-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed, 'embedded-rag-layout': isEmbeddedRag }">
+    <div v-if="!isEmbeddedRag" class="header">
       <div class="sidebar-brand" @click.stop>
         <router-link v-if="!sidebarCollapsed" to="/" class="brand-link">
           <img :src="infoStore.organization.avatar" class="brand-avatar" />
@@ -529,6 +532,7 @@ provide('settingsModal', {
     </router-view>
 
     <GlobalSearchModal
+      v-if="!isEmbeddedRag"
       v-model:open="conversationSearchOpen"
       :modes="['conversation', 'file']"
       default-mode="conversation"
@@ -541,8 +545,9 @@ provide('settingsModal', {
       @select-file="handleSearchSelectFile"
     />
 
-    <TaskCenterDrawer v-if="userStore.isAdmin" />
+    <TaskCenterDrawer v-if="!isEmbeddedRag && userStore.isAdmin" />
     <SettingsModal
+      v-if="!isEmbeddedRag"
       v-model:visible="showSettingsModal"
       :initial-tab="settingsInitialTab"
       @close="() => (showSettingsModal = false)"
@@ -581,6 +586,10 @@ provide('settingsModal', {
   width: 100%;
   height: 100vh;
   min-width: var(--min-width);
+}
+
+.app-layout.embedded-rag-layout {
+  min-width: 0;
 }
 
 div.header,

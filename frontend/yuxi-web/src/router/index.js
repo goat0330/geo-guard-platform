@@ -3,6 +3,7 @@ import BlankLayout from '@/layouts/BlankLayout.vue'
 import { useUserStore } from '@/stores/user'
 import { useAgentStore } from '@/stores/agent'
 import { sanitizeRedirect } from '@/utils/oidcAutoStart'
+import { EMBEDDED_RAG_ROUTE, isEmbeddedRagMode, isEmbeddedRagRoute } from '@/utils/embeddedRag'
 
 const AppLayout = () => import('@/layouts/AppLayout.vue')
 
@@ -166,6 +167,14 @@ const router = createRouter({
 
 // 全局前置守卫
 router.beforeEach(async (to) => {
+  if (isEmbeddedRagMode()) {
+    if (!isEmbeddedRagRoute(to.path)) return EMBEDDED_RAG_ROUTE
+    if (to.path === '/extensions' && to.query.tab !== 'knowledge') {
+      return { path: '/extensions', query: { ...to.query, tab: 'knowledge' } }
+    }
+    return true
+  }
+
   // 检查路由是否需要认证
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true)
   const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin)

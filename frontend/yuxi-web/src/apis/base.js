@@ -1,5 +1,6 @@
 import { useUserStore, checkAdminPermission, checkSuperAdminPermission } from '@/stores/user'
 import { message } from 'ant-design-vue'
+import { getEmbeddedRagAuthHeaders, isEmbeddedRagApi } from '@/utils/embeddedRag'
 
 function safeRequestMetadata(url, requestOptions, response = null) {
   let path = '[invalid-url]'
@@ -33,6 +34,17 @@ export const buildQuery = (params) => {
     }
   })
   return query.toString()
+}
+
+export function getApiAuthHeaders(url) {
+  if (isEmbeddedRagApi(url)) {
+    return getEmbeddedRagAuthHeaders(
+      window.localStorage,
+      import.meta.env.VITE_GEO_HOST_CLIENT_ID || 'geo-local',
+      import.meta.env.VITE_GEO_HOST_TOKEN_KEY || 'bwy-token'
+    )
+  }
+  return useUserStore().getAuthHeaders()
 }
 
 function safeResponseHeaders(headers) {
@@ -97,6 +109,8 @@ function publicErrorMessage(url, status, headers, requiresAuth) {
  * @returns {Promise} - 请求结果
  */
 export async function apiRequest(url, options = {}, requiresAuth = true, responseType = 'json') {
+  const embeddedRagRequest = isEmbeddedRagApi(url)
+  const requestRequiresAuth = requiresAuth && !embeddedRagRequest
   try {
     const isFormData = options?.body instanceof FormData
     // 默认请求配置
@@ -108,8 +122,12 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       }
     }
 
+    if (embeddedRagRequest) {
+      Object.assign(requestOptions.headers, getApiAuthHeaders(url))
+    }
+
     // 如果需要认证，添加认证头
-    if (requiresAuth) {
+    if (requestRequiresAuth) {
       const userStore = useUserStore()
       if (!userStore.isLoggedIn) {
         throw new Error('用户未登录')
@@ -120,11 +138,22 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
 
     // 发送请求
     const response = await fetch(url, requestOptions)
+    // Java authentication failures use a JSON code even when HTTP status is 200.
+    let responseStatus = response.status
+    if (embeddedRagRequest && response.ok && response.headers.get('Content-Type')?.includes('application/json')) {
+      const body = await response.clone().json()
+      if (Number.isInteger(body?.code) && body.code >= 400) responseStatus = body.code
+    }
 
     // 处理API返回的错误
-    if (!response.ok) {
+    if (!response.ok || responseStatus >= 400) {
       // 尝试解析错误信息
-      const errorMessage = publicErrorMessage(url, response.status, response.headers, requiresAuth)
+      const errorMessage = publicErrorMessage(
+        url,
+        responseStatus,
+        response.headers,
+        requestRequiresAuth || embeddedRagRequest,
+      )
       let errorData = null
 
       console.error('API请求失败:', safeRequestMetadata(url, requestOptions, response))
@@ -133,7 +162,7 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
         errorData = await response.json()
         // 422 常由请求校验失败引起。只记录不可逆的请求元数据；认证头、请求体与
         // 服务端响应都可能包含密码、令牌或其他隐私数据，禁止写入浏览器日志。
-        if (response.status === 422) {
+        if (responseStatus === 422) {
           console.error('API请求校验失败:', safeRequestMetadata(url, requestOptions, response))
         }
       } catch {
@@ -143,15 +172,15 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
 
       // 特殊处理401和403错误
       const error = new Error(errorMessage)
-      error.status = response.status
+      error.status = responseStatus
       error.headers = safeResponseHeaders(response.headers)
       error.response = {
-        status: response.status,
-        data: safeErrorData(errorData, response.status, errorMessage),
+        status: responseStatus,
+        data: safeErrorData(errorData, responseStatus, errorMessage),
         headers: error.headers
       }
 
-      if (response.status === 401 && requiresAuth) {
+      if (responseStatus === 401 && requestRequiresAuth) {
         // 如果是认证失败，可能需要重新登录
         const userStore = useUserStore()
 
@@ -217,8 +246,9 @@ export function apiGet(url, options = {}, requiresAuth = true, responseType = 'j
 }
 
 export function apiAdminGet(url, options = {}, responseType = 'json') {
-  checkAdminPermission()
-  return apiGet(url, options, true, responseType)
+  const embeddedRagRequest = isEmbeddedRagApi(url)
+  if (!embeddedRagRequest) checkAdminPermission()
+  return apiGet(url, options, !embeddedRagRequest, responseType)
 }
 
 export function apiSuperAdminGet(url, options = {}, responseType = 'json') {
@@ -249,8 +279,9 @@ export function apiPost(url, data = {}, options = {}, requiresAuth = true, respo
 }
 
 export function apiAdminPost(url, data = {}, options = {}, responseType = 'json') {
-  checkAdminPermission()
-  return apiPost(url, data, options, true, responseType)
+  const embeddedRagRequest = isEmbeddedRagApi(url)
+  if (!embeddedRagRequest) checkAdminPermission()
+  return apiPost(url, data, options, !embeddedRagRequest, responseType)
 }
 
 export function apiSuperAdminPost(url, data = {}, options = {}, responseType = 'json') {
@@ -281,8 +312,9 @@ export function apiPut(url, data = {}, options = {}, requiresAuth = true, respon
 }
 
 export function apiAdminPut(url, data = {}, options = {}, responseType = 'json') {
-  checkAdminPermission()
-  return apiPut(url, data, options, true, responseType)
+  const embeddedRagRequest = isEmbeddedRagApi(url)
+  if (!embeddedRagRequest) checkAdminPermission()
+  return apiPut(url, data, options, !embeddedRagRequest, responseType)
 }
 
 export function apiSuperAdminPut(url, data = {}, options = {}, responseType = 'json') {
@@ -303,8 +335,9 @@ export function apiDelete(url, options = {}, requiresAuth = true, responseType =
 }
 
 export function apiAdminDelete(url, options = {}) {
-  checkAdminPermission()
-  return apiDelete(url, options, true)
+  const embeddedRagRequest = isEmbeddedRagApi(url)
+  if (!embeddedRagRequest) checkAdminPermission()
+  return apiDelete(url, options, !embeddedRagRequest)
 }
 
 export function apiSuperAdminDelete(url, options = {}) {

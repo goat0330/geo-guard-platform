@@ -7,6 +7,7 @@ import { useUserStore } from '@/stores/user'
 import { useRouter } from 'vue-router'
 import { parseToShanghai } from '@/utils/time'
 import { canSelectFile, isProcessingFile } from '@/utils/knowledge_file_policy'
+import { isEmbeddedRagMode } from '@/utils/embeddedRag'
 
 // 自动轮询参数：链式调度（等上一轮请求全部返回后再排下一轮），处理中文件长时间无进展时按 2 倍退避并最终自动停止；
 // 基础间隔与后端文件统计缓存节奏（10s）对齐，避免高频请求重复全表聚合
@@ -96,7 +97,7 @@ export const useDatabaseStore = defineStore('database', () => {
   async function loadDatabases() {
     state.listLoading = true
     try {
-      const data = userStore.isAdmin
+      const data = isEmbeddedRagMode() || userStore.isAdmin
         ? await databaseApi.getDatabases()
         : await databaseApi.getAccessibleDatabases()
       const list = data?.databases || []

@@ -2,7 +2,16 @@ const RAG_BASE = '/api/dizai/ai/rag'
 const AGENT_BASE = '/geo-ai-agent'
 
 async function request(base, path, options = {}) {
-  const response = await fetch(`${base}${path}`, options)
+  const tokenKey = import.meta.env.VITE_APP_TOKEN_KEY || 'bwy-token'
+  const token = base === RAG_BASE ? localStorage.getItem(tokenKey) : null
+  const response = await fetch(`${base}${path}`, {
+    ...options,
+    headers: {
+      ...options.headers,
+      ...(base === RAG_BASE ? { clientid: import.meta.env.VITE_APP_CLIENT_ID || 'geo-local' } : {}),
+      ...(token ? { [tokenKey]: token } : {}),
+    },
+  })
   const bodyText = await response.text()
   let body = {}
   if (bodyText) {
@@ -12,8 +21,8 @@ async function request(base, path, options = {}) {
       body = { detail: bodyText }
     }
   }
-  if (!response.ok) {
-    throw new Error(body?.detail || `请求失败（${response.status}）`)
+  if (!response.ok || body?.code >= 400) {
+    throw new Error(body?.detail || body?.msg || `请求失败（${response.status}）`)
   }
   return body
 }

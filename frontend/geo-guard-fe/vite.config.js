@@ -48,6 +48,7 @@ export default defineConfig(({ mode }) => {
         '/geo-ai-rag': {
           target: env.VITE_APP_SERVER_URL || 'http://127.0.0.1:8007',
           changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/geo-ai-rag/, '/dizai/ai/rag'),
         },
         '/geo-ai-agent': {
           target: env.VITE_GEO_AGENT_SERVICE_URL || 'http://127.0.0.1:8011',
@@ -66,6 +67,12 @@ export default defineConfig(({ mode }) => {
           rewrite: (path) => `/dizai/ai/rag${path}`,
         },
         '^/api/evaluation': {
+          target: env.VITE_APP_SERVER_URL || 'http://127.0.0.1:8007',
+          changeOrigin: true,
+          secure: false,
+          rewrite: (path) => `/dizai/ai/rag${path}`,
+        },
+        '^/api/workspace': {
           target: env.VITE_APP_SERVER_URL || 'http://127.0.0.1:8007',
           changeOrigin: true,
           secure: false,

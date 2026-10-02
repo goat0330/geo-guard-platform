@@ -2,8 +2,7 @@
   <section class="knowledge-workspace">
     <iframe
       class="knowledge-workspace__frame"
-      :key="userStore.token || 'signed-out'"
-      src="/yuxi/index.html#/extensions?tab=knowledge"
+      :src="embeddedRagUrl"
       title="Yuxi 知识库工作台"
       loading="lazy"
     />
@@ -11,24 +10,9 @@
 </template>
 
 <script setup>
-import { watch } from 'vue'
-import { useUserStore } from '@/store/user.js'
-
 defineOptions({ name: 'KnowledgeWorkspace' })
 
-const userStore = useUserStore()
-
-watch(
-  () => userStore.token,
-  (token) => {
-    if (token) {
-      localStorage.setItem('user_token', token)
-    } else {
-      localStorage.removeItem('user_token')
-    }
-  },
-  { immediate: true },
-)
+const embeddedRagUrl = `/yuxi/index.html?embed=rag&v=${Date.now()}#/extensions?tab=knowledge`
 </script>
 
 <style lang="less" scoped>
