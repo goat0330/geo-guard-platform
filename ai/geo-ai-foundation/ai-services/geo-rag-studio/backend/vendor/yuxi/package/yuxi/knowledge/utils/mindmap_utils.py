@@ -8,10 +8,6 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from yuxi.config.options import system_options
-from yuxi.knowledge.runtime import knowledge_base
-from yuxi.models import select_model
-from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from yuxi.utils import logger
 
 MINDMAP_FILE_PAGE_SIZE = 500
@@ -299,6 +295,8 @@ def remove_files_from_mindmap(mindmap_data: dict[str, Any], removed_filenames: s
 
 
 async def get_mindmap_database_files(kb_id: str) -> dict[str, Any]:
+    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
     kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
     if kb is None:
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
@@ -317,6 +315,8 @@ async def get_mindmap_database_files(kb_id: str) -> dict[str, Any]:
 
 async def get_mindmap_diff(kb_id: str) -> dict[str, Any]:
     """获取思维导图变更检测结果。"""
+    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
     kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
     if kb is None:
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
@@ -334,6 +334,10 @@ async def get_mindmap_diff(kb_id: str) -> dict[str, Any]:
 
 async def update_mindmap_incremental(kb_id: str, user_prompt: str = "") -> dict[str, Any]:
     """增量更新思维导图：纯删除场景无需 AI，有新增时调用 AI 整合。"""
+    from yuxi.config.options import system_options
+    from yuxi.models import select_model
+    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
     kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
     if kb is None or not kb.mindmap:
         raise HTTPException(status_code=400, detail="知识库没有现有思维导图，请使用全量生成")
@@ -431,6 +435,10 @@ async def update_mindmap_incremental(kb_id: str, user_prompt: str = "") -> dict[
 async def generate_database_mindmap(
     kb_id: str, file_ids: list[str] | None = None, user_prompt: str = "", incremental: bool = False
 ) -> dict[str, Any]:
+    from yuxi.config.options import system_options
+    from yuxi.models import select_model
+    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
     if incremental:
         return await update_mindmap_incremental(kb_id, user_prompt)
 
@@ -518,6 +526,7 @@ async def generate_database_mindmap(
 
 
 async def get_mindmap_databases_overview(uid: str) -> dict[str, Any]:
+    from yuxi.knowledge.runtime import knowledge_base
     from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
 
     file_repo = KnowledgeFileRepository()
@@ -544,6 +553,8 @@ async def get_mindmap_databases_overview(uid: str) -> dict[str, Any]:
 
 
 async def get_database_mindmap_data(kb_id: str) -> dict[str, Any]:
+    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
     kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
     if kb is None:
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
@@ -578,6 +589,8 @@ async def remove_file_from_mindmap(kb_id: str, file_id: str, filename: str | Non
         file_id: 被删除文件的 ID
         filename: 被删除文件的文件名（可选，用于旧数据兼容）
     """
+    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
     kb = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
     if not kb or not kb.mindmap:
         return
@@ -619,6 +632,8 @@ async def batch_remove_files_from_mindmap(kb_id: str, removals: list[tuple[str, 
         kb_id: 知识库 ID
         removals: [(file_id, filename), ...] 待移除的文件列表
     """
+    from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+
     if not removals:
         return
 

@@ -67,3 +67,34 @@ def test_disabled_scoped_provider_skips_model_requests(monkeypatch):
 
     monkeypatch.setattr(embedding, "_model", unexpected_model)
     assert asyncio.run(embedding.embed_texts(["slope"], {"base_url": "", "model": ""})) is None
+
+
+def test_registered_provider_probes_report_runtime_model_and_protocol(tmp_path, monkeypatch):
+    from app.provider_store import save_provider
+
+    monkeypatch.setattr(settings, "rag_db_path", str(tmp_path / "rag.sqlite3"))
+    with TestClient(main.app) as client:
+        save_provider({"provider_id": "unit-probe", "display_name": "Unit probe", "base_url": "https://unit.example/v1",
+                       "api_key": "unit-placeholder", "capabilities": ["embedding", "rerank"],
+                       "extra_json": {"rerank_protocol": "dashscope"}, "enabled_models": [
+                           {"id": "embed-unit", "type": "embedding", "dimension": 2},
+                           {"id": "rank-unit", "type": "rerank"}]})
+
+        async def embed_probe(texts, config):
+            assert config["model"] == "embed-unit"
+            return [[1.0, 0.0]]
+
+        async def rank_probe(query, documents, config):
+            assert config["model"] == "rank-unit"
+            assert config["protocol"] == "dashscope"
+            return [0.75] * len(documents)
+
+        monkeypatch.setattr(main, "embed_texts", embed_probe)
+        monkeypatch.setattr(main, "rerank", rank_probe)
+        embedded = client.post("/api/v1/providers/embedding/test", json={"model": "unit-probe:embed-unit"})
+        assert embedded.status_code == 200
+        assert embedded.json()["model"] == "embed-unit"
+        ranked = client.post("/api/v1/providers/reranker/test", json={"query": "rainfall", "documents": ["slope"], "model": "unit-probe:rank-unit"})
+        assert ranked.status_code == 200
+        assert ranked.json()["model"] == "rank-unit"
+        assert ranked.json()["provider"] == "dashscope"

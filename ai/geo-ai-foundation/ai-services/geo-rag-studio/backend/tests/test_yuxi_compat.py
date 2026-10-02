@@ -69,6 +69,30 @@ def test_native_single_folder_delete_and_basic_info(tmp_path, monkeypatch):
     assert db.list_folders(kb_id) == []
 
 
+def test_native_folder_move_preserves_tree_and_rejects_cycles(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "文件夹移动", "kb_type": "local"}).json()["kb_id"]
+    prefix = f"/api/knowledge/databases/{kb_id}"
+    root = client.post(f"{prefix}/folders", json={"folder_name": "root"}).json()["file_id"]
+    child = client.post(f"{prefix}/folders", json={"folder_name": "child", "parent_id": root}).json()["file_id"]
+    target = client.post(f"{prefix}/folders", json={"folder_name": "target"}).json()["file_id"]
+    moved = client.put(f"{prefix}/documents/{root}/move", json={"new_parent_id": target})
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["is_folder"] is True
+    assert moved.json()["parent_id"] == target
+    assert client.get(f"{prefix}/documents/{child}/basic").json()["parent_id"] == root
+    for invalid_parent in (root, child):
+        rejected = client.put(f"{prefix}/documents/{root}/move", json={"new_parent_id": invalid_parent})
+        assert rejected.status_code == 400
+        assert client.get(f"{prefix}/documents/{root}/basic").json()["parent_id"] == target
+    other_kb = client.post("/api/knowledge/databases", json={"database_name": "other", "kb_type": "local"}).json()["kb_id"]
+    foreign = client.post(f"/api/knowledge/databases/{other_kb}/folders", json={"folder_name": "foreign"}).json()["file_id"]
+    assert client.put(f"{prefix}/documents/{root}/move", json={"new_parent_id": foreign}).status_code == 400
+    restored = client.put(f"{prefix}/documents/{root}/move", json={"new_parent_id": None})
+    assert restored.status_code == 200
+    assert restored.json()["parent_id"] is None
+
+
 @pytest.mark.parametrize("index_failure", [False, True])
 def test_native_delete_cleans_index_before_metadata(tmp_path, monkeypatch, index_failure):
     from app import milvus_store

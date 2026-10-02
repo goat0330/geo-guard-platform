@@ -1,9 +1,56 @@
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import app
+
+
+@pytest.mark.parametrize("operation", ["single", "batch", "folder"])
+@pytest.mark.parametrize("content_outdated", [False, True])
+def test_deleting_files_prunes_saved_mindmap_without_model(tmp_path, monkeypatch, operation, content_outdated):
+    from app import db, knowledge_features
+
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "导图删除测试", "kb_type": "local"}).json()["kb_id"]
+    doc_ids = []
+    names = ["removed.txt", "retained.txt"]
+    for name in names:
+        added = client.post("/api/v1/documents/text", json={"file_name": name, "text": "Slope inspection and rainfall.", "knowledge_base_id": kb_id})
+        assert added.status_code == 200
+        doc_ids.append(added.json()["document_id"])
+    fingerprint = "previously-outdated-content" if content_outdated else knowledge_features.indexed_content_fingerprint(doc_ids)
+    # This is a saved-tree fixture for deletion tests, not evidence of LLM generation.
+    tree = {"content": "Knowledge", "children": [
+        {"content": "Empty after removal", "children": [{"content": names[0], "children": []}]},
+        {"content": "Preserved", "children": [{"content": names[1], "children": []}]},
+    ]}
+    db.save_knowledge_view(kb_id, "mindmap", "", {
+        "mindmap": tree, "source_document_ids": doc_ids,
+        "source_document_names": dict(zip(doc_ids, names)), "source_fingerprint": fingerprint,
+    })
+    def unexpected_model(*args, **kwargs):
+        pytest.fail("Deleting a file must not call a model")
+    monkeypatch.setattr(knowledge_features, "_chat_completion", unexpected_model)
+    prefix = f"/api/knowledge/databases/{kb_id}"
+    if operation == "batch":
+        removed = client.request("DELETE", f"{prefix}/documents/batch", json=[doc_ids[0], "missing-fixture"])
+        assert removed.status_code == 200
+        assert removed.json()["deleted_count"] == 1
+    elif operation == "folder":
+        folder_id = client.post(f"{prefix}/folders", json={"folder_name": "Remove folder"}).json()["file_id"]
+        assert client.put(f"{prefix}/documents/{doc_ids[0]}/move", json={"new_parent_id": folder_id}).status_code == 200
+        assert client.delete(f"{prefix}/documents/{folder_id}").status_code == 200
+    else:
+        assert client.delete(f"{prefix}/documents/{doc_ids[0]}").status_code == 200
+    saved = client.get(f"{prefix}/mindmap").json()
+    assert saved["mindmap"] == {"content": "Knowledge", "children": [tree["children"][1]]}
+    assert saved["source_document_ids"] == [doc_ids[1]]
+    assert saved["source_document_names"] == {doc_ids[1]: names[1]}
+    diff = client.get(f"{prefix}/mindmap/diff").json()
+    assert diff["needs_update"] is content_outdated
+    assert db.get_document(doc_ids[1]) is not None
 
 
 def _client(tmp_path, monkeypatch):

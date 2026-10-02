@@ -36,7 +36,7 @@ Cesium Ion 的第三方默认访问令牌已从随仓库打包的 Mars3D/Cesium 
 
 ## 当前验证
 
-- RAG Studio：2026-10-03 最新源码通过 `compileall`，全量测试为 92 passed。Java :8007 → RAG :8010 最新真实验收上传 1,528,947 字节重庆地灾预案 PDF：49 页、1,008 个版面块；文件级 256 tokens / 0% overlap 覆盖知识库默认 512 tokens，产生 67 个 Chunk，重建仍为 67 块，所有文本与直接调用迁入的 Yuxi dispatcher 一致。BM25 50 条、Vector 0 条、Fusion 5 条、Rerank 0 条、Evidence 5 条、Final Context 1,840 字符。5 条证据的页码/bbox 与保存的来源配对一致，框内可提取实际 PDF 原文。真实失败与重试验证了 `error_parsing`、`error_indexing`、待入库统计及成功后的错误清除；嵌套文件夹删除实测没有残留行、块或检索证据。知识库的空模型地址不再与全局配置拼接。Embedding/Reranker/MinerU Provider 测试返回 503 unavailable，PyMuPDF Parser 实测 200。此前独立 Milvus `:8013` 测试仍仅覆盖 BM25，不能代替真实 Vector/Rerank 和 Milvus 删除验收。
+- RAG Studio：2026-10-03 最新源码通过 `compileall`，全量测试为 100 passed。Java :8007 → RAG :8010 最新真实验收上传 1,528,947 字节重庆地灾预案 PDF：49 页、1,008 个版面块；文件级 256 tokens / 0% overlap 覆盖知识库默认 512 tokens，产生 67 个 Chunk，重建仍为 67 块，所有文本与直接调用迁入的 Yuxi dispatcher 一致。BM25 50 条、Vector 0 条、Fusion 5 条、Rerank 0 条、Evidence 5 条、Final Context 1,840 字符。5 条证据的页码/bbox 与保存的来源配对一致，框内可提取实际 PDF 原文。真实失败与重试验证了 `error_parsing`、`error_indexing`、待入库统计及成功后的错误清除；嵌套文件夹移动和删除实测通过，循环移动返回 400，删除后没有残留行、块或检索证据。思维导图删除直接调用迁入的 Yuxi 函数；真实门面对手工保存树的删除同步已通过，这不代表 LLM 生成已验收。知识库的空模型地址不再与全局配置拼接。Embedding/Reranker/MinerU Provider 测试返回 503 unavailable，PyMuPDF Parser 实测 200。此前独立 Milvus `:8013` 测试仍仅覆盖 BM25，不能代替真实 Vector/Rerank 和 Milvus 删除验收。
 - LangGraph：Python smoke 测试与编译通过；当前没有 LLM 凭据，未验证真实模型生成。
 - 前端：主前端/Yuxi 联合生产构建通过，AI Studio 生产路由及开发/生产宿主鉴权的 3 项测试通过；`frontend/yuxi-web` 此前全量单元测试 325 项通过，认证/上传/Markdown 相关测试 24 项通过。构建有大 JS chunk 警告。此前验证码经 `:5174 → :8007` 返回有效 GIF（HTTP 200），本机登录、用户信息和 RAG API 代理已实测通过。本轮前端启动使用默认开发 HTTPS，浏览器仍需要用户处理本地证书信任，尚未完成最新界面的浏览器验收。
 - 本地认证服务：Maven 编译成功，当前没有测试用例。

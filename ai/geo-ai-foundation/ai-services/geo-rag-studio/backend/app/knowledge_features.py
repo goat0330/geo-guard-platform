@@ -10,6 +10,8 @@ from .chat import complete_chat
 from .embedding import embed_batched, enabled as embedding_enabled
 
 from . import db
+from .yuxi_port import _upstream  # noqa: F401
+from yuxi.knowledge.utils.mindmap_utils import remove_files_from_mindmap
 
 
 def _fingerprint(document_ids: list[str]) -> str:
@@ -20,6 +22,31 @@ def _fingerprint(document_ids: list[str]) -> str:
 
 def indexed_content_fingerprint(document_ids: list[str]) -> str:
     return _fingerprint(document_ids)
+
+
+def remove_document_from_mindmaps(document: dict) -> None:
+    """Prune stored trees using Yuxi's helper; preserve prior content staleness."""
+    knowledge_base_id = document["knowledge_base_id"]
+    for view in db.list_knowledge_views(knowledge_base_id, "mindmap"):
+        payload = view["payload"]
+        tree = payload.get("mindmap")
+        if not tree:
+            continue
+        ids = payload.get("source_document_ids", view["source_id"].split(","))
+        if document["id"] not in ids:
+            continue
+        names = payload.get("source_document_names") or {}
+        removed_name = names.get(document["id"], document["file_name"])
+        remaining = [item for item in ids if item != document["id"]]
+        updated = {
+            **payload,
+            "mindmap": remove_files_from_mindmap(tree, {removed_name}),
+            "source_document_ids": remaining,
+            "source_document_names": {key: value for key, value in names.items() if key != document["id"]},
+        }
+        if payload.get("source_fingerprint") == _fingerprint(ids):
+            updated["source_fingerprint"] = _fingerprint(remaining)
+        db.save_knowledge_view(knowledge_base_id, "mindmap", view["source_id"], updated)
 
 
 async def index_knowledge_graph_vectors(knowledge_base: dict, graph: dict) -> dict:
@@ -309,19 +336,7 @@ async def generate_mindmap(knowledge_base: dict, document_ids: list[str] | None 
         previous_names = (saved_payload or {}).get("source_document_names", {})
         removed_names = {previous_names.get(item, "") for item in removed_ids}
 
-        def prune(node: dict, root: bool = False) -> dict | None:
-            if not isinstance(node, dict):
-                return None
-            content = str(node.get("content") or "")
-            original_children = node.get("children") or []
-            if content in removed_names and not original_children and not root:
-                return None
-            children = [child for item in original_children if (child := prune(item)) is not None]
-            if original_children and not children and not root:
-                return None
-            return {**node, "children": children}
-
-        existing_mindmap = prune(existing_mindmap, root=True)
+        existing_mindmap = remove_files_from_mindmap(existing_mindmap, removed_names)
     refresh_all = incremental and content_changed and not added_ids and not removed_ids
     generation_docs = [
         doc for doc in documents

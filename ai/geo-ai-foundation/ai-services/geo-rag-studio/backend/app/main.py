@@ -19,10 +19,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from . import db, milvus_store
 from .config import settings
+from .provider_store import resolve_runtime_config
 from .embedding import embed_texts, enabled as embedding_enabled, value as embedding_value
 from .parser import parse_pdf_layout, parse_pdf_mineru, parse_pdf_mineru_official, render_pdf_page
 from .pipeline import index_existing_document, ingest_file, ingest_pdf, ingest_text, parse_existing_document
-from .knowledge_features import build_entity_graph, generate_mindmap, index_knowledge_graph_vectors, indexed_content_fingerprint
+from .knowledge_features import build_entity_graph, generate_mindmap, index_knowledge_graph_vectors, indexed_content_fingerprint, remove_document_from_mindmaps
 from .retrieval import ProviderUnavailable, retrieve, retrieve_debug
 from .yuxi_port.rerank import enabled as reranker_enabled, rerank
 from .yuxi_port import _upstream  # noqa: F401
@@ -219,7 +220,7 @@ async def health():
 
 @app.post("/api/v1/providers/embedding/test")
 async def test_embedding_provider(request: EmbeddingTestRequest):
-    config = request.model_dump(exclude_unset=True)
+    config = resolve_runtime_config(request.model_dump(exclude_unset=True), "embedding")
     if not embedding_enabled(config):
         return JSONResponse(
             status_code=503,
@@ -317,7 +318,9 @@ async def test_parser_provider(
 
 @app.post("/api/v1/providers/reranker/test")
 async def test_reranker_provider(request: RerankerTestRequest):
-    config = request.model_dump(exclude={"query", "documents"}, exclude_unset=True, exclude_none=True)
+    config = resolve_runtime_config(
+        request.model_dump(exclude={"query", "documents"}, exclude_unset=True, exclude_none=True), "rerank"
+    )
     protocol = config.get("protocol") or settings.rerank_protocol
     if any(not document.strip() for document in request.documents):
         raise HTTPException(status_code=422, detail="documents 不能包含空文本")
@@ -1212,6 +1215,7 @@ async def delete_knowledge_base_document(knowledge_base_id: str, document_id: st
         raise HTTPException(status_code=404, detail="Document not found")
     if settings.rag_search_backend == "milvus":
         await milvus_store.delete_document(knowledge_base_id, document_id)
+    remove_document_from_mindmaps(document)
     deleted = db.delete_document(document_id)
     file_path = Path(deleted.get("file_path") or "").resolve()
     upload_root = Path(settings.rag_upload_dir).resolve()

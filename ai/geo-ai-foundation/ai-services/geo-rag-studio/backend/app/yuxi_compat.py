@@ -826,8 +826,14 @@ async def yuxi_delete_folder(knowledge_base_id: str, folder_id: str):
 
 @router.put("/api/knowledge/databases/{knowledge_base_id}/documents/{document_id}/move")
 async def yuxi_move_document(knowledge_base_id: str, document_id: str, payload: dict = Body(...)):
-    result = await rag.move_knowledge_base_document(knowledge_base_id, document_id, DocumentMovePayload(folder_id=payload.get("new_parent_id")))
-    return {**result, "new_parent_id": result.get("folder_id")}
+    rag._knowledge_base_or_404(knowledge_base_id)
+    if db.folder_exists(document_id, knowledge_base_id):
+        try:
+            return _yuxi_folder(db.move_folder(document_id, knowledge_base_id, payload.get("new_parent_id")))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await rag.move_knowledge_base_document(knowledge_base_id, document_id, DocumentMovePayload(folder_id=payload.get("new_parent_id")))
+    return _yuxi_document(db.get_document(document_id))
 
 
 def _staging_paths(stage_id: str) -> tuple[Path, Path]:

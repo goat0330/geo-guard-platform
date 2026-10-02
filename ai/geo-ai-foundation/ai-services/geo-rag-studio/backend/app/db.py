@@ -355,6 +355,28 @@ def move_document(document_id: str, knowledge_base_id: str, folder_id: str | Non
     return cursor.rowcount > 0
 
 
+def move_folder(folder_id: str, knowledge_base_id: str, parent_id: str | None) -> dict:
+    with connect() as connection:
+        folders = {row["id"]: dict(row) for row in connection.execute(
+            "SELECT * FROM folders WHERE knowledge_base_id=?", (knowledge_base_id,)
+        ).fetchall()}
+        if folder_id not in folders:
+            raise ValueError("Folder not found")
+        current = parent_id
+        while current:
+            if current == folder_id:
+                raise ValueError("Cannot move a folder into itself or its own subfolder")
+            if current not in folders:
+                raise ValueError("Parent is not a folder in this knowledge base")
+            current = folders[current].get("parent_id")
+        if any(item["id"] != folder_id and item.get("parent_id") == parent_id
+               and item["name"] == folders[folder_id]["name"] for item in folders.values()):
+            raise ValueError("Folder already exists at this level")
+        connection.execute("UPDATE folders SET parent_id=? WHERE id=? AND knowledge_base_id=?",
+                           (parent_id, folder_id, knowledge_base_id))
+        return {**folders[folder_id], "parent_id": parent_id}
+
+
 def delete_folder(folder_id: str, knowledge_base_id: str) -> bool:
     with connect() as connection:
         row = connection.execute(
