@@ -24,7 +24,7 @@ Cesium Ion 的第三方默认访问令牌已从随仓库打包的 Mars3D/Cesium 
 3. Java Maven reactor 不依赖组织内 `bwy-project` 父 POM 或私有 Maven 制品；框架源码在仓库内。Windows x64 的 JDK 21、Maven 3.9.16 和验证所需 Maven 依赖缓存随 GitHub Releases 离线构建包提供。进入 `backend/geo-guard-backend` 执行 `.\build-offline.ps1 -KitArchive .\geo-guard-offline-build-kit.zip`，构建使用包内 JDK 并强制 Maven `-o`，不访问 Maven Central，也不要求预装 Java 或 Maven。
 4. 本地验证码由 `backend/geo-guard-backend/local-auth-service/run-local.ps1` 提示设置开发账号后启动；账号密码不写入仓库。它提供本地登录与 RAG API 门面，不是完整业务数据库服务。
 
-完整业务 Spring Boot 应用的运行还需要 PostgreSQL、Redis、数据库结构和部署配置。已新增不含密钥的 `backend/geo-guard-backend/config/geo-local.yml`，并用本机 PostgreSQL 18 + PostGIS 在项目忽略目录建立独立实例 `:15432`。`backend/geo-guard-backend/database/` 提供不含旧业务记录的 94 个表及索引、约束；初始化脚本已在全新独立集群实际执行，重复运行保留已有数据库。完整业务 JAR 已成功连上该 PostgreSQL，但当前启动失败于 Redis `:16379` 不可达，监测视图和本地账号初始化也尚未完成。当前 `:8007` 本地服务只承载登录/验证码和 RAG 门面，不能据此宣称整个业务后端已联调完成。
+完整业务 Spring Boot 应用已用包内 JDK 21 在 `:8008` 启动，连接项目自己的 PostgreSQL/PostGIS `:15432` 和 Redis `:26379`。`backend/geo-guard-backend/database/` 提供不含旧业务记录的 94 个表及索引、约束；初始化脚本已在全新独立集群实际执行，重复运行保留已有数据库。新增脚本支持独立 Redis、随机密码管理员、JWT 密钥和完整业务服务启动；真实验证码、账号校验、用户信息、客户端 ID 校验、退出及会话失效已通过，详见后端 README。监测视图、本项目菜单、完整业务 API 和前端鉴权联调尚未完成。当前 `:8007` 仍为原本地认证/RAG 门面，不能据此宣称最终统一业务门面已完成。
 
 ## 发布清理
 
@@ -32,7 +32,7 @@ Cesium Ion 的第三方默认访问令牌已从随仓库打包的 Mars3D/Cesium 
 
 发布范围是上述当前前端、Spring Boot 后端和 AI 层，不包含旧的重复后端仓库。项目原创部分采用 Apache License 2.0，详见根目录 `LICENSE`；Yuxi 前端、RuoYi-Vue-Plus 框架和 RAGFlow-style parser 的第三方许可与署名见 `THIRD_PARTY_NOTICES.md`。第三方字体二进制因公开再分发权限未确认而从候选中移除，前端使用系统字体栈。
 
-公开仓库地址为 `https://github.com/goat0330/geo-guard-platform`。本地 PostgreSQL/PostGIS 与 94 个空表已建立；完整 Spring Boot 业务服务仍缺可用 Redis、监测视图和本地账号初始化，其本机运行验收尚未通过。外部 Provider 也需在本机配置后再做真实模型验收。
+公开仓库地址为 `https://github.com/goat0330/geo-guard-platform`。本地 PostgreSQL/PostGIS、94 个业务/系统表、独立 Redis 和管理员已建立，完整 Spring Boot 业务服务已启动并通过真实认证验收；完整业务联调、监测视图、菜单和统一 `:8007` 门面仍待完成。外部 Provider 需配置后做真实模型验收。本地后续修改尚未全部推送。
 
 ## 当前验证
 

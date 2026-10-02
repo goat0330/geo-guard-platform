@@ -5,6 +5,10 @@ server:
 spring:
   application:
     name: geo-guard-backend
+  ai:
+    mcp:
+      server:
+        enabled: false
   datasource:
     dynamic:
       primary: master
@@ -18,8 +22,7 @@ spring:
   data:
     redis:
       host: ${GEO_REDIS_HOST:127.0.0.1}
-      port: ${GEO_REDIS_PORT:16379}
-      password: ${GEO_REDIS_PASSWORD:}
+      port: ${GEO_REDIS_PORT:26379}
       database: 0
   servlet:
     multipart:
@@ -41,6 +44,17 @@ redisson:
     subscription-connection-pool-size: 5
 sse:
   path: /dizai/sse/connect
+security:
+  excludes:
+    - /favicon.ico
+captcha:
+  enable: true
+  type: MATH
+  category: CIRCLE
+sa-token:
+  token-name: bwy-token
+  token-prefix: ''
+  jwt-secret-key: ${GEO_JWT_SECRET}
 user:
   password:
     maxRetryCount: 5
