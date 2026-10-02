@@ -1,4 +1,4 @@
-param([int]$Port = 8008)
+param([int]$Port = 8007)
 
 $ErrorActionPreference = 'Stop'
 $java = Join-Path $PSScriptRoot '.offline-build-kit\jdk\bin\java.exe'

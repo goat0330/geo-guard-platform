@@ -1,14 +1,18 @@
 package org.dromara.common.satoken.config;
 
 import cn.dev33.satoken.dao.SaTokenDao;
+import cn.dev33.satoken.filter.SaTokenContextFilterForJakartaServlet;
 import cn.dev33.satoken.jwt.StpLogicJwtForSimple;
 import cn.dev33.satoken.stp.StpInterface;
 import cn.dev33.satoken.stp.StpLogic;
+import cn.dev33.satoken.util.SaTokenConsts;
+import jakarta.servlet.DispatcherType;
 import org.dromara.common.core.factory.YmlPropertySourceFactory;
 import org.dromara.common.satoken.core.dao.PlusSaTokenDao;
 import org.dromara.common.satoken.core.service.SaPermissionImpl;
 import org.dromara.common.satoken.handler.SaTokenExceptionHandler;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.PropertySource;
 
@@ -20,6 +24,19 @@ import org.springframework.context.annotation.PropertySource;
 @AutoConfiguration
 @PropertySource(value = "classpath:common-satoken.yml", factory = YmlPropertySourceFactory.class)
 public class SaTokenConfig {
+
+    @Bean
+    public FilterRegistrationBean<SaTokenContextFilterForJakartaServlet> saTokenContextRegistration(
+        SaTokenContextFilterForJakartaServlet filter) {
+        // StreamingResponseBody/SSE also re-enter MVC during ASYNC completion.
+        FilterRegistrationBean<SaTokenContextFilterForJakartaServlet> registration =
+            new FilterRegistrationBean<>(filter);
+        registration.setOrder(SaTokenConsts.SA_TOKEN_CONTEXT_FILTER_ORDER);
+        registration.setAsyncSupported(true);
+        registration.setDispatcherTypes(DispatcherType.REQUEST, DispatcherType.ASYNC);
+        registration.addUrlPatterns("/*");
+        return registration;
+    }
 
     @Bean
     public StpLogic getStpLogicJwt() {

@@ -1,5 +1,5 @@
 param(
-    [string]$BaseUrl = 'http://127.0.0.1:8008',
+    [string]$BaseUrl = 'http://127.0.0.1:8007',
     [string]$DockerExecutable = 'docker',
     [string]$Username = 'admin'
 )

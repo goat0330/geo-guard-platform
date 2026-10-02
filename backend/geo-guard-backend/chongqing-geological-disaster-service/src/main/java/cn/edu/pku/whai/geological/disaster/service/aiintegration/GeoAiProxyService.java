@@ -112,7 +112,8 @@ public class GeoAiProxyService {
         }
         HttpHeaders headers = new HttpHeaders();
         response.headers().map().forEach((name, values) -> {
-            if (Set.of("content-type", "content-disposition", "cache-control", "etag", "last-modified", "retry-after")
+            if (Set.of("content-type", "content-disposition", "cache-control", "etag", "last-modified", "retry-after",
+                    "x-yuxi-preview-type", "x-yuxi-preview-filename")
                     .contains(name.toLowerCase(Locale.ROOT))) {
                 values.forEach(value -> headers.add(name, value));
             }

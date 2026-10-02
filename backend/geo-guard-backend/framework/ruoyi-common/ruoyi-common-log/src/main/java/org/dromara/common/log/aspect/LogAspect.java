@@ -87,9 +87,14 @@ public class LogAspect {
             String ip = ServletUtils.getClientIP();
             operLog.setOperIp(ip);
             operLog.setOperUrl(StringUtils.substring(ServletUtils.getRequest().getRequestURI(), 0, 255));
-            LoginUser loginUser = LoginHelper.getLoginUser();
-            operLog.setOperName(loginUser.getUsername());
-            operLog.setDeptName(loginUser.getDeptName());
+            // Public captcha requests and logout completion have no active token session.
+            if (LoginHelper.getUserId() != null) {
+                LoginUser loginUser = LoginHelper.getLoginUser();
+                if (loginUser != null) {
+                    operLog.setOperName(loginUser.getUsername());
+                    operLog.setDeptName(loginUser.getDeptName());
+                }
+            }
 
             if (e != null) {
                 operLog.setStatus(BusinessStatus.FAIL.ordinal());
@@ -111,7 +116,7 @@ public class LogAspect {
             SpringUtils.context().publishEvent(operLog);
         } catch (Exception exp) {
             // 记录本地异常日志
-            log.error("异常信息:{}", exp.getMessage());
+            log.error("操作日志记录失败:{}", exp.getClass().getSimpleName());
         } finally {
             KEY_CACHE.remove();
         }

@@ -5,6 +5,7 @@ import cn.edu.pku.whai.geological.disaster.data.service.IHazardPointService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,6 +17,7 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Collections;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -41,6 +43,14 @@ class GeoAiProxyControllerTest {
                 exchange.getResponseBody().write("event: trace\ndata: {\"status\":\"running\"}\n\n".getBytes(StandardCharsets.UTF_8));
                 exchange.getResponseBody().flush();
                 exchange.getResponseBody().write("event: done\ndata: {}\n\n".getBytes(StandardCharsets.UTF_8));
+            } else if (exchange.getRequestURI().getPath().equals("/api/workspace/knowledge/file")) {
+                byte[] response = "%PDF-1.7\npreview transport".getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().add("Content-Type", "application/pdf");
+                exchange.getResponseHeaders().add("Content-Disposition", "inline; filename=source.pdf");
+                exchange.getResponseHeaders().add("X-Yuxi-Preview-Type", "pdf");
+                exchange.getResponseHeaders().add("X-Yuxi-Preview-Filename", "source.pdf");
+                exchange.sendResponseHeaders(200, response.length);
+                exchange.getResponseBody().write(response);
             } else {
                 byte[] response = "{\"ok\":true}".getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().add("Content-Type", "application/json");
@@ -75,6 +85,26 @@ class GeoAiProxyControllerTest {
         assertThat(requestedPath.get()).isEqualTo("/api/v1/retrieve");
         assertThat(objectMapper.readTree(requestBody.get()).path("query").asText()).isEqualTo("rainfall");
         assertThat(new String(response.getBody(), StandardCharsets.UTF_8)).isEqualTo("{\"ok\":true}");
+    }
+
+    @Test
+    void ragPreviewPreservesPdfBytesAndPreviewHeaders() throws Exception {
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        when(request.getRequestURI()).thenReturn("/dizai/ai/rag/api/workspace/knowledge/file");
+        when(request.getMethod()).thenReturn("GET");
+        when(request.getHeaderNames()).thenReturn(Collections.emptyEnumeration());
+
+        var response = controller.proxyRagApi(request);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        assertThat(response.getBody()).isNotNull();
+        response.getBody().writeTo(output);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getHeaders().get("Content-Type")).containsExactly("application/pdf");
+        assertThat(response.getHeaders().getFirst("X-Yuxi-Preview-Type")).isEqualTo("pdf");
+        assertThat(response.getHeaders().getFirst("X-Yuxi-Preview-Filename")).isEqualTo("source.pdf");
+        assertThat(response.getHeaders().getFirst("Content-Disposition")).contains("inline");
+        assertThat(output.toString(StandardCharsets.UTF_8)).isEqualTo("%PDF-1.7\npreview transport");
     }
 
     @Test

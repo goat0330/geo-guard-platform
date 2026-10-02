@@ -40,7 +40,10 @@ public class PlusWebInvokeTimeInterceptor implements HandlerInterceptor {
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
         String url = request.getMethod() + " " + request.getRequestURI();
         // 打印请求参数
-        if (isJsonRequest(request)) {
+        if (StringUtils.startsWithIgnoreCase(request.getContentType(), MediaType.MULTIPART_FORM_DATA_VALUE)) {
+            // getParameterMap() consumes the multipart body before a raw API proxy can forward it.
+            log.info("[PLUS]开始请求 => URL[{}],参数类型[multipart]", url);
+        } else if (isJsonRequest(request)) {
             String jsonParam = "";
             if (request instanceof RepeatedlyRequestWrapper) {
                 jsonParam = IoUtil.read(request.getReader());

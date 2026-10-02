@@ -1,7 +1,7 @@
 # Public local configuration. Credentials belong in process environment variables.
 server:
   address: 127.0.0.1
-  port: ${GEO_BUSINESS_PORT:8008}
+  port: ${GEO_BUSINESS_PORT:8007}
 spring:
   application:
     name: geo-guard-backend
@@ -54,6 +54,8 @@ captcha:
 sa-token:
   token-name: bwy-token
   token-prefix: ''
+  # Header authentication keeps raw multipart requests intact for the RAG proxy.
+  is-read-body: false
   jwt-secret-key: ${GEO_JWT_SECRET}
 user:
   password:
