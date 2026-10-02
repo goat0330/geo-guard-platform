@@ -22,10 +22,18 @@ chongqing-geological-disaster-start/target/chongqing-geological-disaster-start.j
 
 ## 本地运行配置
 
-公开仓库不包含 `application*.yml`、业务数据库凭据或部署环境参数。启动前需要提供 PostgreSQL、Redis、数据库结构和应用配置，可通过 Spring Boot 外部配置文件或环境变量注入。例如将自有配置放在 `./config/` 后运行：
+公开仓库提供不含密钥的 `config/geo-local.yml` 与 `database/` 空库结构；数据库密码、账号和外部服务凭据由部署者本地设置。Windows 可先使用已安装的 PostgreSQL/PostGIS 初始化项目独立集群：
 
 ```powershell
-java -jar chongqing-geological-disaster-start/target/chongqing-geological-disaster-start.jar --spring.config.additional-location=file:./config/ --server.port=8007
+.\initialize-local-db.ps1 -PostgreSqlBin 'D:\PostgreSQL\18\bin'
+```
+
+默认数据库位于 `127.0.0.1:15432`。结构包含 94 个业务/系统表，不导入旧业务数据或用户账号；脚本已完成全新集群初始化验证。详见 `database/README.md`。Redis 默认地址为 `127.0.0.1:16379`，须另外提供。密码通过 `GEO_DB_PASSWORD` 和 `GEO_REDIS_PASSWORD` 环境变量注入，勿把密码放入源码或命令行。
+
+注入密码、确认 Redis 可用后，用离线包内 JDK 启动完整业务 JAR。下面使用 `:8008` 做独立运行验证，避免占用现有 `:8007` 本地认证/RAG 门面；完整门面替换仍待联调：
+
+```powershell
+.\.offline-build-kit\jdk\bin\java.exe -jar chongqing-geological-disaster-start/target/chongqing-geological-disaster-start.jar --spring.config.additional-location=file:./config/geo-local.yml
 ```
 
 实际启动和接口联调需要有效的本地数据库、Redis 与对应业务配置。只有构建成功不能证明服务已经启动或连接了这些依赖。模型 API Key 仅在启用对应外部模型能力时需要，由部署者通过本地配置提供，勿提交到 Git。
@@ -37,5 +45,6 @@ Dify 知识库文件下载通过 Java 服务端代理，使用 `dizai.dify.knowl
 - 使用完整离线构建包在干净源码副本构建；临时屏蔽系统 Java/Maven 路径，确认使用包内 Temurin JDK 21 和 Maven。
 - `-o -B verify`：33 个 reactor 模块成功，48 个测试套件、387 项测试，失败 0、错误 0、跳过 0。
 - Maven 可执行包构建通过；JAR 内含 Spring Boot launcher、启动类和业务依赖。实际运行依赖用户提供的数据库、Redis 和配置。
+- PostgreSQL 18.4 / PostGIS 3.6.2：94 个业务/系统表在全新集群初始化成功；再次运行脚本保留已有表。完整业务 JAR 已连接项目独立数据库，下一处实际启动错误是 Redis `:16379` 未运行。监测视图、账号初始化与完整业务 API 的运行验收尚未完成。
 
 单元测试不替代外部短信、APP 推送、会商平台、数据库和模型服务的联调。

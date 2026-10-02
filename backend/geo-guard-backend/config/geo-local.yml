@@ -1,0 +1,67 @@
+# Public local configuration. Credentials belong in process environment variables.
+server:
+  address: 127.0.0.1
+  port: ${GEO_BUSINESS_PORT:8008}
+spring:
+  application:
+    name: geo-guard-backend
+  datasource:
+    dynamic:
+      primary: master
+      strict: true
+      datasource:
+        master:
+          driver-class-name: org.postgresql.Driver
+          url: ${GEO_DB_URL:jdbc:postgresql://127.0.0.1:15432/geo_guard}
+          username: ${GEO_DB_USERNAME:geo_guard}
+          password: ${GEO_DB_PASSWORD:}
+  data:
+    redis:
+      host: ${GEO_REDIS_HOST:127.0.0.1}
+      port: ${GEO_REDIS_PORT:16379}
+      password: ${GEO_REDIS_PASSWORD:}
+      database: 0
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 110MB
+mybatis-plus:
+  mapperPackage: cn.edu.pku.whai.**.mapper,org.dromara.**.mapper
+  mapper-locations: classpath*:mapper/**/*Mapper.xml
+redisson:
+  key-prefix: geo-guard
+  threads: 4
+  netty-threads: 4
+  single-server-config:
+    client-name: geo-guard-backend
+    connection-minimum-idle-size: 2
+    connection-pool-size: 8
+    idle-connection-timeout: 10000
+    timeout: 3000
+    subscription-connection-pool-size: 5
+sse:
+  path: /dizai/sse/connect
+user:
+  password:
+    maxRetryCount: 5
+    lockTime: 10
+auth:
+  default-perms: []
+  default-url: /auth/login
+app:
+  scheduling:
+    enabled: false
+dizai:
+  algorithm:
+    token: ${GEO_ALGORITHM_TOKEN:}
+  geoserver:
+    url: ${GEO_GEOSERVER_URL:http://127.0.0.1:8080}
+  dify:
+    url: ${GEO_DIFY_BASE_URL:http://127.0.0.1:8081/v1}
+    knowledge-base-api-key: ${GEO_DIFY_KNOWLEDGE_BASE_API_KEY:}
+geo:
+  ai:
+    rag:
+      base-url: http://127.0.0.1:8010
+    graph:
+      base-url: http://127.0.0.1:8011

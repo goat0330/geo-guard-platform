@@ -11,6 +11,7 @@
 # Local data and generated files
 **/node_modules/
 **/.venv/
+**/.runtime/
 **/target/
 **/dist/
 ai/geo-ai-foundation/ai-services/geo-rag-studio/data/
