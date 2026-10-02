@@ -67,14 +67,11 @@
         <span v-if="!isCollapsed" class="nav-label">复盘优化</span>
       </div>
 
-      <template v-if="isDevelopment">
-        <div class="menu-divider" aria-hidden="true"></div>
-        <!-- 开发/学习控制台不进入生产业务导航 -->
-        <div class="nav-item" :class="{ 'is-active': activeRoute === '/ai-studio' }" @click="handleNav('/ai-studio')">
-          <img src="@/assets/imgs/home/icon-app-grid.png" class="nav-icon" alt="AI 工作台" />
-          <span v-if="!isCollapsed" class="nav-label">AI 工作台</span>
-        </div>
-      </template>
+      <div class="menu-divider" aria-hidden="true"></div>
+      <div class="nav-item" :class="{ 'is-active': activeRoute === '/ai-studio' }" @click="handleNav('/ai-studio')">
+        <img src="@/assets/imgs/home/icon-app-grid.png" class="nav-icon" alt="AI 工作台" />
+        <span v-if="!isCollapsed" class="nav-label">AI 工作台</span>
+      </div>
 
       <!-- 智能体广场 -->
       <div class="nav-item" :class="{ 'is-active': activeRoute.startsWith('/agents') }" @click="handleNav('/agents')">
@@ -145,7 +142,6 @@ const { userInfo, noticeCount } = storeToRefs(userStore)
 
 const isMapWorkspace = (path) => path.startsWith('/warning/') || path === '/review'
 const isCollapsed = ref(isMapWorkspace(route.path))
-const isDevelopment = import.meta.env.DEV
 const isWarningOpen = ref(true)
 
 const activeRoute = computed(() => route.path)

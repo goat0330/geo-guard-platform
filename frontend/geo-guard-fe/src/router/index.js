@@ -66,12 +66,12 @@ const routes = [
         component: () => import('@/views/agents/index.vue'),
         meta: { title: '智能体广场' },
       },
-      ...(import.meta.env.DEV ? [{
+      {
         path: 'ai-studio',
         name: 'GeoAiStudio',
         component: () => import('@/views/geoAiStudio/index.vue'),
         meta: { title: 'AI 工作台' },
-      }] : []),
+      },
       {
         path: 'message-center',
         name: 'MessageCenter',

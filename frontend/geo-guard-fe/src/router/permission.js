@@ -6,12 +6,6 @@ const whiteList = ['/login']
 
 export default function setupPermissionGuard(router) {
   router.beforeEach(async (to, from, next) => {
-    // AI Studio is a local-only development module backed by the local Python services.
-    if (import.meta.env.DEV && to.path === '/ai-studio') {
-      next()
-      return
-    }
-
     const userStore = useUserStore()
     const hasToken = userStore.token || getToken()
 
