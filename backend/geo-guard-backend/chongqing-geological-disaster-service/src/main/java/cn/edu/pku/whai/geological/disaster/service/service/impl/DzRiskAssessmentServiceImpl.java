@@ -264,12 +264,13 @@ public class DzRiskAssessmentServiceImpl implements IDzRiskAssessmentService {
         Date now = new Date();
         DateTime old;
         DateTime oold;
-        if (bo.getOffset() <= 0) {
+        int offset = bo.getOffset() == null ? 0 : bo.getOffset();
+        if (offset <= 0) {
             old = DateUtil.beginOfDay(now);
             oold = DateUtil.beginOfDay(DateUtil.offsetDay(old, -1));
         } else {
-            old = DateUtil.endOfDay(DateUtil.offsetDay(now, -bo.getOffset()));
-            oold = DateUtil.endOfDay(DateUtil.offsetDay(old, -bo.getOffset()));
+            old = DateUtil.endOfDay(DateUtil.offsetDay(now, -offset));
+            oold = DateUtil.endOfDay(DateUtil.offsetDay(old, -offset));
         }
 
         // 统计风险

@@ -117,6 +117,15 @@ class DzRiskAssessmentServiceImplTest {
 
     @Test
     void statIncludesHazardPointCountByRiskLevel() {
+        assertHazardPointStat(0);
+    }
+
+    @Test
+    void omittedOffsetUsesCurrentDayStatistics() {
+        assertHazardPointStat(null);
+    }
+
+    private void assertHazardPointStat(Integer offset) {
         DzRiskAssessmentMapper riskAssessmentMapper = mock(DzRiskAssessmentMapper.class);
         when(riskAssessmentMapper.statRisk(any(), any(), any())).thenReturn(List.of());
         when(riskAssessmentMapper.statArea(any(), any(), any())).thenReturn(List.of());
@@ -137,7 +146,7 @@ class DzRiskAssessmentServiceImplTest {
             mock(AdRegionMapper.class)
         );
         DzRiskAssessmentStatBo bo = new DzRiskAssessmentStatBo();
-        bo.setOffset(0);
+        bo.setOffset(offset);
 
         assertThat(service.stat(bo).getStatHazardPoint()).containsExactly(hazardPointStat);
     }

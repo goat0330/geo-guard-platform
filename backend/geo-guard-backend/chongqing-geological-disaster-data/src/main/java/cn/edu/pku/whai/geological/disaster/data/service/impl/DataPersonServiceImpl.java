@@ -332,8 +332,7 @@ public class DataPersonServiceImpl implements IDataPersonService {
     private Long resolveSlopeUnitCount(Integer areaType, String provinceCode, String cityCode, String countyCode,
                                        String streetCode, String villageCode) {
         QueryWrapper<SlopeUnit> wrapper = Wrappers.query();
-        wrapper.eq(areaType == 1, "pilot_area_1", 1);
-        wrapper.eq(areaType == 2, "pilot_area_2", 1);
+        applyAreaTypeFilter(wrapper, areaType);
         wrapper.eq(StringUtils.isNotBlank(provinceCode), "province_code", provinceCode);
         wrapper.eq(StringUtils.isNotBlank(cityCode), "city_code", cityCode);
         wrapper.eq(StringUtils.isNotBlank(countyCode), "county_code", countyCode);

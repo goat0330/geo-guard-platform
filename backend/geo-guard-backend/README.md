@@ -58,8 +58,9 @@ Dify 知识库文件下载通过 Java 服务端代理，使用 `dizai.dify.knowl
 - Maven 可执行包构建通过；JAR 内含 Spring Boot launcher、启动类和业务依赖。实际运行依赖用户提供的数据库、Redis 和配置。
 - PostgreSQL 18.4 / PostGIS 3.6.2：103 个业务/系统表和 11 个视图在全新空库初始化成功；再次运行脚本保留已有表。新增视图的事务测试验证本地记录、空间关联、更新与空坐标，测试记录全部回滚；10 个对应 Java 列表接口返回 HTTP 200 / code 200（业务数据尚未录入）。Redis 7.4.10 返回 `PONG`，数据位于 D 盘。
 - 完整业务 JAR 使用包内 JDK 21 启动并监听 `:8007`；真实认证 smoke 的 19 项断言通过，包含验证码、Redis 有效期与不可复用、错误密码、管理员登录、用户信息、客户端 ID、退出和退出后拒绝。
-- 最新离线目标构建：33 个 reactor 模块成功，8 项 async/匿名日志/multipart/PDF 代理回归测试通过。此前 387 项全量结果是历史完整构建结果，未在每次局部修复后重跑。
+- async/匿名日志/multipart/PDF 代理修复时，33 个 reactor 模块离线构建成功，8 项目标回归测试通过。随后修正人口统计缺省 `areaType` 和风险统计缺省 `offset` 的空指针问题；最新离线 `verify` / JAR 打包仍为 33 个模块成功，6 项对应目标测试通过。重新启动业务 JAR 后，两个真实统计接口均返回 HTTP 200 / code 200，空业务库返回真实零值和空列表。此前 387 项全量结果是历史完整构建结果，未在每次局部修复后重跑。
 - 真实 Java → RAG PDF 验收：上传 1,528,947 字节、49 页、1008 个版面块及 bbox、38 个分块；BM25 38 条候选、5 条 Evidence、Final Context 3342 字符。原文预览保持字节一致，仅返回 `application/pdf`，带 Yuxi PDF 预览标识；5 个证据框均在 PDF 页面内且框内能提取原文。未配置 Embedding/Reranker/MinerU 时测试返回 503 unavailable，Vector/Rerank 未执行。
-- 监测视图、本项目菜单数据、完整业务 API 和真实浏览器端到端验收仍待完成；上述认证及 RAG 结果不等于全部业务或 Yuxi 功能对齐验收完成。
+- 2026-10-03 原生 Yuxi 文件接口验收：`documents/add` 仅登记上传文件，随后分别 parse/index；相同 49 页 PDF 的单文件 256 token / 0% overlap 覆盖知识库 512 token 默认值，产生 67 个分块，文本全部与迁入的 Yuxi dispatcher 直接输出一致。无参数重新入库保留该配置，5 条 Evidence 的页码和 bbox 配对且框内存在真实 PDF 原文。
+- 本项目菜单数据、完整业务 API 和真实浏览器端到端验收仍待完成；首页 `/dizai/home/dashboard` 尚无对应业务实现。上述认证及 RAG 结果不等于全部业务或 Yuxi 功能对齐验收完成。
 
 单元测试不替代外部短信、APP 推送、会商平台、数据库和模型服务的联调。
