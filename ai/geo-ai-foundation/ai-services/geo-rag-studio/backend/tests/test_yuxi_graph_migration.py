@@ -1,5 +1,8 @@
 import asyncio
 import math
+from pathlib import Path
+
+import pytest
 
 from app import db
 from app.config import settings
@@ -45,6 +48,136 @@ def test_yuxi_graph_fusion_uses_weighted_reciprocal_rank_k_60():
     assert fused[0]["fusion"] == 1 / 62 + 2 / 61
     assert fused[1]["fusion"] == 2 / 62
     assert fused[0]["fusion_sources"] == ["chunk", "graph"]
+
+
+@pytest.mark.parametrize("fresh_snapshot", [True, False])
+def test_deleting_document_prunes_graph_and_keeps_shared_entities(
+    fresh_snapshot: bool, tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(settings, "rag_db_path", str(tmp_path / "rag.sqlite3"))
+    monkeypatch.setattr(settings, "rag_upload_dir", str(tmp_path / "documents"))
+    monkeypatch.setattr(settings, "rag_workspace_dir", str(tmp_path / "workspace"))
+    monkeypatch.setattr(settings, "rag_search_backend", "sqlite")
+    Path(settings.rag_upload_dir).mkdir()
+    Path(settings.rag_workspace_dir).mkdir()
+
+    with TestClient(app) as client:
+        knowledge_base = client.post(
+            "/api/v1/knowledge-bases",
+            json={"name": "Graph deletion parity", "config": {"embedding": {"model": "test-embedding"}}},
+        ).json()
+        documents = []
+        for name, text in (
+            ("source-a.txt", "Shared hazard and unique slope."),
+            ("source-b.txt", "Shared hazard and river."),
+        ):
+            response = client.post(
+                "/api/v1/documents/text",
+                json={"file_name": name, "text": text, "knowledge_base_id": knowledge_base["id"]},
+            )
+            assert response.status_code == 200, response.text
+            documents.append(db.get_document(response.json()["document_id"]))
+
+        first, second = documents
+        first_chunk = db.get_chunks(first["id"], include_embedding=False)[0]
+        second_chunk = db.get_chunks(second["id"], include_embedding=False)[0]
+        document_ids = [first["id"], second["id"]]
+        fingerprint = knowledge_features.indexed_content_fingerprint(document_ids)
+        saved_fingerprint = fingerprint if fresh_snapshot else "stale-graph-snapshot"
+        graph = {
+            "status": "indexed",
+            "generation": "test",
+            "source_document_ids": document_ids,
+            "source_fingerprint": saved_fingerprint,
+            "processed_chunk_count": 2,
+            "failed_chunks": [],
+            "vector_index": {"status": "indexed", "model": "test-embedding", "record_count": 5},
+            "nodes": [
+                {
+                    "id": f"CHUNK-{first_chunk['id']}", "type": "Chunk", "chunk_id": first_chunk["id"],
+                    "document_id": first["id"], "file_name": first["file_name"],
+                },
+                {
+                    "id": f"CHUNK-{second_chunk['id']}", "type": "Chunk", "chunk_id": second_chunk["id"],
+                    "document_id": second["id"], "file_name": second["file_name"],
+                },
+                {
+                    "id": "E-SHARED", "name": "shared hazard", "type": "Hazard",
+                    "document_id": first["id"], "file_name": first["file_name"],
+                    "source_document_ids": document_ids,
+                },
+                {"id": "E-ONLY", "name": "unique slope", "type": "Hazard", "document_id": second["id"],
+                 "file_name": second["file_name"]},
+                {"id": "E-KEEP", "name": "river", "type": "Location", "document_id": second["id"],
+                 "file_name": second["file_name"], "source_document_ids": [second["id"]]},
+                {"id": "E-RELATION", "name": "shared fault", "type": "Hazard", "document_id": first["id"],
+                 "file_name": first["file_name"]},
+            ],
+            "edges": [
+                {"id": "M-A-SHARED", "source": f"CHUNK-{first_chunk['id']}", "target": "E-SHARED",
+                 "type": "MENTIONS", "document_id": first["id"]},
+                {"id": "M-A-ONLY", "source": f"CHUNK-{first_chunk['id']}", "target": "E-ONLY",
+                 "type": "MENTIONS", "document_id": first["id"]},
+                {"id": "M-B-SHARED", "source": f"CHUNK-{second_chunk['id']}", "target": "E-SHARED",
+                 "type": "MENTIONS", "document_id": second["id"]},
+                {"id": "M-B-KEEP", "source": f"CHUNK-{second_chunk['id']}", "target": "E-KEEP",
+                 "type": "MENTIONS", "document_id": second["id"]},
+                {"id": "R-A", "source": "E-SHARED", "target": "E-ONLY", "type": "RELATED_TO",
+                 "document_id": first["id"], "chunk_id": first_chunk["id"]},
+                {"id": "R-B", "source": "E-SHARED", "target": "E-KEEP", "type": "RELATED_TO",
+                 "document_id": second["id"], "chunk_id": second_chunk["id"]},
+                {"id": "R-B-RELATION", "source": "E-RELATION", "target": "E-KEEP", "type": "RELATED_TO",
+                 "document_id": second["id"], "chunk_id": second_chunk["id"]},
+            ],
+        }
+        db.save_knowledge_view(knowledge_base["id"], "graph", "", graph)
+        db.replace_knowledge_graph_embeddings(
+            knowledge_base["id"], saved_fingerprint, "test-embedding",
+            [
+                {"record_type": "entity", "record_id": record_id, "content": record_id, "embedding": [1.0, 0.0]}
+                for record_id in ("E-SHARED", "E-ONLY", "E-KEEP", "E-RELATION")
+            ] + [
+                {"record_type": "triple", "record_id": record_id, "content": record_id, "embedding": [0.0, 1.0]}
+                for record_id in ("R-A", "R-B", "R-B-RELATION")
+            ],
+        )
+
+        deleted = client.delete(f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/{first['id']}")
+        assert deleted.status_code == 200, deleted.text
+        saved = db.get_knowledge_view(knowledge_base["id"], "graph")
+        assert saved is not None
+        pruned = saved["payload"]
+        node_ids = {item["id"] for item in pruned["nodes"]}
+        edge_ids = {item["id"] for item in pruned["edges"]}
+        assert node_ids == {f"CHUNK-{second_chunk['id']}", "E-SHARED", "E-KEEP", "E-RELATION"}
+        assert edge_ids == {"M-B-SHARED", "M-B-KEEP", "R-B", "R-B-RELATION"}
+        shared = next(item for item in pruned["nodes"] if item["id"] == "E-SHARED")
+        assert shared["source_document_ids"] == [second["id"]]
+        assert shared["document_id"] == second["id"]
+        assert shared["file_name"] == second["file_name"]
+        relation_entity = next(item for item in pruned["nodes"] if item["id"] == "E-RELATION")
+        assert relation_entity["document_id"] == second["id"]
+        assert relation_entity["file_name"] == second["file_name"]
+        assert pruned["source_document_ids"] == [second["id"]]
+        assert pruned["source_fingerprint"] == (
+            knowledge_features.indexed_content_fingerprint([second["id"]])
+            if fresh_snapshot else saved_fingerprint
+        )
+        status = client.get(f"/api/v1/knowledge-bases/{knowledge_base['id']}/graph-build/status")
+        assert status.status_code == 200, status.text
+        assert status.json()["status"] == ("indexed" if fresh_snapshot else "outdated")
+        vectors = db.get_knowledge_graph_embeddings(
+            knowledge_base["id"], pruned["source_fingerprint"], "test-embedding"
+        )
+        assert {(item["record_type"], item["record_id"]) for item in vectors} == {
+            ("entity", "E-SHARED"), ("entity", "E-KEEP"), ("entity", "E-RELATION"),
+            ("triple", "R-B"), ("triple", "R-B-RELATION")
+        }
+        assert pruned["vector_index"]["record_count"] == 5
+
+        deleted_last = client.delete(f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents/{second['id']}")
+        assert deleted_last.status_code == 200, deleted_last.text
+        assert db.get_knowledge_view(knowledge_base["id"], "graph") is None
 
 
 def test_yuxi_hybrid_score_matches_milvus_256_weighted_ranker():

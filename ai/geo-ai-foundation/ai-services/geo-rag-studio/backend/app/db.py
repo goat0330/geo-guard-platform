@@ -463,6 +463,30 @@ def get_knowledge_graph_embeddings(
     ]
 
 
+def prune_knowledge_graph_embeddings(
+    knowledge_base_id: str,
+    record_keys: set[tuple[str, str]],
+    fingerprint_update: tuple[str, str] | None = None,
+) -> int:
+    """Remove deleted graph records and keep surviving vectors aligned to a fresh graph snapshot."""
+    deleted = 0
+    with connect() as connection:
+        for record_type, record_id in sorted(record_keys):
+            cursor = connection.execute(
+                "DELETE FROM knowledge_graph_embeddings WHERE knowledge_base_id=? AND record_type=? AND record_id=?",
+                (knowledge_base_id, record_type, record_id),
+            )
+            deleted += cursor.rowcount
+        if fingerprint_update:
+            previous, current = fingerprint_update
+            connection.execute(
+                "UPDATE knowledge_graph_embeddings SET source_fingerprint=? "
+                "WHERE knowledge_base_id=? AND source_fingerprint=?",
+                (current, knowledge_base_id, previous),
+            )
+    return deleted
+
+
 def list_knowledge_views(knowledge_base_id: str, view_type: str) -> list[dict]:
     with connect() as connection:
         rows = connection.execute(

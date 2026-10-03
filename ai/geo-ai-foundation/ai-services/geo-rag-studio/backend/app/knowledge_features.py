@@ -82,6 +82,197 @@ def remove_document_from_mindmaps(document: dict) -> None:
         db.save_knowledge_view(knowledge_base_id, "mindmap", view["source_id"], updated)
 
 
+def remove_document_from_graphs(document: dict) -> None:
+    """Prune a deleted file from saved graph snapshots and their local vector records."""
+    knowledge_base_id = document["knowledge_base_id"]
+    document_id = document["id"]
+    chunks = db.get_chunks(document_id, include_embedding=False)
+    deleted_chunk_ids = {str(chunk["id"]) for chunk in chunks}
+    deleted_chunk_node_ids = {f"CHUNK-{chunk_id}" for chunk_id in deleted_chunk_ids}
+    indexed_ids = sorted(
+        item["id"] for item in db.list_documents(knowledge_base_id) if item["status"] == "indexed"
+    )
+    previous_fingerprint = _fingerprint(indexed_ids)
+    remaining_indexed_ids = [item for item in indexed_ids if item != document_id]
+    current_fingerprint = _fingerprint(remaining_indexed_ids)
+
+    for view in db.list_knowledge_views(knowledge_base_id, "graph"):
+        payload = view["payload"]
+        nodes = payload.get("nodes") or []
+        edges = payload.get("edges") or []
+        source_ids = [str(item) for item in payload.get("source_document_ids", [])]
+        has_document_records = any(
+            str(item.get("document_id") or item.get("source_document_id") or "") == document_id
+            or str(item.get("chunk_id") or "") in deleted_chunk_ids
+            for item in [*nodes, *edges]
+        )
+        if document_id not in source_ids and not has_document_records:
+            continue
+
+        was_current = (
+            sorted(source_ids) == indexed_ids
+            and payload.get("source_fingerprint") == previous_fingerprint
+        )
+        kept_nodes = []
+        removed_node_ids = set(deleted_chunk_node_ids)
+        for node in nodes:
+            node_id = str(node.get("id") or "")
+            node_document_id = str(node.get("document_id") or node.get("source_document_id") or "")
+            chunk_id = str(node.get("chunk_id") or "")
+            if node.get("type") == "Chunk" and (
+                node_document_id == document_id or chunk_id in deleted_chunk_ids or node_id in deleted_chunk_node_ids
+            ):
+                removed_node_ids.add(node_id)
+                continue
+            kept_nodes.append(node)
+
+        kept_edges = []
+        removed_relation_ids = set()
+        for edge in edges:
+            edge_document_id = str(edge.get("document_id") or edge.get("source_document_id") or "")
+            if (
+                edge_document_id == document_id
+                or str(edge.get("chunk_id") or "") in deleted_chunk_ids
+                or str(edge.get("source") or "") in removed_node_ids
+                or str(edge.get("target") or "") in removed_node_ids
+            ):
+                if edge.get("type") != "MENTIONS" and edge.get("id"):
+                    removed_relation_ids.add(str(edge["id"]))
+                continue
+            kept_edges.append(edge)
+
+        node_by_id = {str(node.get("id") or ""): node for node in kept_nodes if node.get("id")}
+        mentions_by_entity: dict[str, list[dict]] = {}
+        relation_document_ids: dict[str, set[str]] = {}
+        mentioned_entity_ids = {
+            str(edge.get("target") or "") for edge in edges if edge.get("type") == "MENTIONS"
+        }
+        for edge in kept_edges:
+            if edge.get("type") == "MENTIONS":
+                mentions_by_entity.setdefault(str(edge.get("target") or ""), []).append(edge)
+                continue
+            edge_document_id = str(edge.get("document_id") or edge.get("source_document_id") or "")
+            if not edge_document_id and edge.get("chunk_id"):
+                chunk_node = next(
+                    (item for item in kept_nodes if str(item.get("chunk_id") or "") == str(edge["chunk_id"])),
+                    {},
+                )
+                edge_document_id = str(chunk_node.get("document_id") or "")
+            if edge_document_id:
+                for entity_id in (str(edge.get("source") or ""), str(edge.get("target") or "")):
+                    relation_document_ids.setdefault(entity_id, set()).add(edge_document_id)
+
+        removed_entity_ids = set()
+        cleaned_nodes = []
+        for node in kept_nodes:
+            node_id = str(node.get("id") or "")
+            if node.get("type") == "Chunk":
+                cleaned_nodes.append(node)
+                continue
+            mentions = mentions_by_entity.get(node_id, [])
+            linked_document_ids = {
+                str(edge.get("document_id") or edge.get("source_document_id") or "")
+                or str(node_by_id.get(str(edge.get("source") or ""), {}).get("document_id") or "")
+                for edge in mentions
+            }
+            linked_document_ids.update(relation_document_ids.get(node_id, set()))
+            linked_document_ids.discard("")
+            source_ids_for_node = node.get("source_document_ids")
+            if isinstance(source_ids_for_node, list):
+                remaining_node_sources = [str(item) for item in source_ids_for_node if str(item) != document_id]
+            else:
+                remaining_node_sources = []
+            if linked_document_ids:
+                remaining_node_sources = sorted(linked_document_ids)
+            node_document_id = str(node.get("document_id") or node.get("source_document_id") or "")
+            if not remaining_node_sources and (
+                node_document_id == document_id
+                or isinstance(source_ids_for_node, list)
+                or node_id in mentioned_entity_ids
+            ) and not relation_document_ids.get(node_id):
+                removed_entity_ids.add(node_id)
+                continue
+            if isinstance(source_ids_for_node, list):
+                node["source_document_ids"] = remaining_node_sources
+            if node_document_id == document_id and remaining_node_sources:
+                surviving_source = remaining_node_sources[0]
+                surviving_mention = next(
+                    (edge for edge in mentions if str(edge.get("document_id") or "") == surviving_source),
+                    mentions[0] if mentions else None,
+                )
+                chunk_node = node_by_id.get(str((surviving_mention or {}).get("source") or "")) or next(
+                    (item for item in kept_nodes if str(item.get("document_id") or "") == surviving_source), {}
+                )
+                node["document_id"] = surviving_source
+                if chunk_node.get("file_name"):
+                    node["file_name"] = chunk_node["file_name"]
+            cleaned_nodes.append(node)
+
+        cleaned_edges = []
+        for edge in kept_edges:
+            if (
+                str(edge.get("source") or "") in removed_entity_ids
+                or str(edge.get("target") or "") in removed_entity_ids
+            ):
+                if edge.get("type") != "MENTIONS" and edge.get("id"):
+                    removed_relation_ids.add(str(edge["id"]))
+                continue
+            cleaned_edges.append(edge)
+        cleaned_nodes = [node for node in cleaned_nodes if str(node.get("id") or "") not in removed_entity_ids]
+
+        remaining_source_ids = [item for item in source_ids if item != document_id]
+        updated = {
+            **payload,
+            "nodes": cleaned_nodes,
+            "edges": cleaned_edges,
+            "source_document_ids": remaining_source_ids,
+        }
+        if isinstance(payload.get("source_document_names"), dict):
+            updated["source_document_names"] = {
+                key: value for key, value in payload["source_document_names"].items() if key != document_id
+            }
+        if was_current:
+            updated["source_fingerprint"] = current_fingerprint
+        if isinstance(payload.get("processed_chunk_count"), int):
+            updated["processed_chunk_count"] = max(
+                0, payload["processed_chunk_count"] - (len(chunks) if document_id in source_ids else 0)
+            )
+        failed_chunks = [
+            item for item in payload.get("failed_chunks", [])
+            if str(item.get("document_id") or "") != document_id
+        ]
+        if "failed_chunks" in payload:
+            updated["failed_chunks"] = failed_chunks
+            if not failed_chunks and payload.get("status") == "failed":
+                updated["status"] = "indexed"
+
+        vector_index = dict(payload.get("vector_index") or {})
+        if vector_index:
+            updated["vector_index"] = vector_index
+
+        has_entities = any(node.get("type") != "Chunk" for node in cleaned_nodes)
+        if not remaining_source_ids and not has_entities and not cleaned_edges:
+            db.delete_knowledge_view(knowledge_base_id, "graph", view["source_id"])
+            continue
+
+        fingerprint_update = None
+        if was_current:
+            fingerprint_update = (str(payload.get("source_fingerprint") or ""), current_fingerprint)
+        db.prune_knowledge_graph_embeddings(
+            knowledge_base_id,
+            {*(('entity', item) for item in removed_entity_ids), *(('triple', item) for item in removed_relation_ids)},
+            fingerprint_update,
+        )
+        if vector_index:
+            model = str(vector_index.get("model") or "")
+            graph_fingerprint = str(updated.get("source_fingerprint") or "")
+            vector_index["record_count"] = len(
+                db.get_knowledge_graph_embeddings(knowledge_base_id, graph_fingerprint, model)
+            ) if model and graph_fingerprint else 0
+            updated["vector_index"] = vector_index
+        db.save_knowledge_view(knowledge_base_id, "graph", view["source_id"], updated)
+
+
 async def index_knowledge_graph_vectors(knowledge_base: dict, graph: dict) -> dict:
     """Index entity and relation vectors in local SQLite, matching Yuxi's graph-vector records."""
     knowledge_base_id = knowledge_base["id"]
@@ -231,6 +422,9 @@ async def build_entity_graph(knowledge_base: dict) -> dict:
                         raw_attributes = entity.get("attributes", [])
                         if isinstance(raw_attributes, list):
                             attributes.extend(item for item in raw_attributes if isinstance(item, dict))
+                        prior_source_ids = existing.get("source_document_ids")
+                        if not isinstance(prior_source_ids, list):
+                            prior_source_ids = []
                         nodes_by_id[entity_id] = {
                             **existing,
                             "id": entity_id,
@@ -241,6 +435,10 @@ async def build_entity_graph(knowledge_base: dict) -> dict:
                             "attributes": attributes,
                             "document_id": document["id"],
                             "file_name": document["file_name"],
+                            "source_document_ids": sorted({
+                                str(item) for item in [*prior_source_ids, existing.get("document_id"), document["id"]]
+                                if item
+                            }),
                             "normalized": {"type": kind},
                         }
                         mention_id = f"MENTIONS-{chunk['id']}-{entity_id}"
