@@ -62,6 +62,7 @@
       <div v-if="viewMode === 'source'" class="content-panel source-panel">
         <AgentFilePreview
           :file="sourcePreviewFile"
+          :location="sourceLocation"
           :file-path="file?.filename || ''"
           :status="sourcePreview.loading ? 'loading' : ''"
           loading-message="正在加载文件内容..."
@@ -148,6 +149,10 @@ const props = defineProps({
   fileId: {
     type: [String, Number],
     default: ''
+  },
+  sourceLocation: {
+    type: Object,
+    default: null
   }
 })
 
@@ -345,7 +350,10 @@ const loadBasicInfo = async () => {
     }
 
     file.value = nextFile
-    viewMode.value = getDefaultDetailView(nextFile)
+    viewMode.value =
+      props.sourceLocation && canPreviewOriginal(nextFile)
+        ? 'source'
+        : getDefaultDetailView(nextFile)
   } catch (error) {
     if (requestId !== basicRequestSeq) return
     console.error('加载文件基本信息失败:', error)
@@ -415,6 +423,16 @@ watch(
     }
   },
   { immediate: true }
+)
+
+watch(
+  () => props.sourceLocation,
+  (location) => {
+    if (location && file.value && canPreviewOriginal(file.value)) {
+      viewMode.value = 'source'
+    }
+  },
+  { deep: true }
 )
 
 watch(

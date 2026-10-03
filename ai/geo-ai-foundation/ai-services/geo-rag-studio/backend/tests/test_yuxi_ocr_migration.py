@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib
+import time
 
 from fastapi.testclient import TestClient
 
@@ -162,8 +163,20 @@ def test_yuxi_document_upload_uses_selected_upstream_ocr_engine(tmp_path, monkey
     assert added.json()["items"][0]["file_meta"]["processing_params"]["ocr_engine"] == "pp_structure_v3_ocr"
     parsed = client.post(f"/api/knowledge/databases/{kb_id}/documents/parse", json={"file_ids": [file_id]})
     assert parsed.status_code == 200, parsed.text
-    assert parsed.json()["failed"] == []
+    task_id = parsed.json()["task_id"]
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        task_response = client.get(f"/api/tasks/{task_id}")
+        assert task_response.status_code == 200, task_response.text
+        task = task_response.json()["task"]
+        if task["status"] in {"success", "failed", "cancelled"}:
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError(f"RAG task {task_id} did not finish")
+    assert task["status"] == "success"
+    assert task["result"]["failed"] == []
     assert calls == [(".pdf", {})]
-    document = parsed.json()["processed"][0]
+    document = task["result"]["processed"][0]
     assert document["parser"] == "pp_structure_v3_ocr"
     assert document["status"] == "parsed"

@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
   description TEXT NOT NULL DEFAULT '',
   kb_type TEXT NOT NULL DEFAULT 'local',
   config_json TEXT NOT NULL DEFAULT '{}',
+  created_by TEXT,
+  created_by_department_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -65,7 +67,9 @@ CREATE TABLE IF NOT EXISTS evaluation_datasets (
   knowledge_base_id TEXT NOT NULL,
   name TEXT NOT NULL,
   cases_json TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  build_metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS evaluation_runs (
   id TEXT PRIMARY KEY,
@@ -121,6 +125,23 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 CREATE INDEX IF NOT EXISTS idx_blocks_document ON blocks(document_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id, chunk_index);
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  progress REAL NOT NULL DEFAULT 0,
+  message TEXT NOT NULL DEFAULT '',
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT,
+  error TEXT,
+  cancel_requested INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, created_at DESC);
 """
 
 
@@ -143,6 +164,12 @@ def connect():
 
 
 def _migrate(connection):
+    knowledge_base_columns = {row["name"] for row in connection.execute("PRAGMA table_info(knowledge_bases)")}
+    if "created_by" not in knowledge_base_columns:
+        connection.execute("ALTER TABLE knowledge_bases ADD COLUMN created_by TEXT")
+    if "created_by_department_id" not in knowledge_base_columns:
+        connection.execute("ALTER TABLE knowledge_bases ADD COLUMN created_by_department_id TEXT")
+    connection.execute("UPDATE knowledge_bases SET created_by='1' WHERE created_by IS NULL")
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(documents)")}
     if "knowledge_base_id" not in columns:
         connection.execute("ALTER TABLE documents ADD COLUMN knowledge_base_id TEXT")
@@ -152,6 +179,11 @@ def _migrate(connection):
         connection.execute("ALTER TABLE documents ADD COLUMN error_message TEXT")
     if "updated_at" not in columns:
         connection.execute("ALTER TABLE documents ADD COLUMN updated_at TEXT")
+    dataset_columns = {row["name"] for row in connection.execute("PRAGMA table_info(evaluation_datasets)")}
+    if "description" not in dataset_columns:
+        connection.execute("ALTER TABLE evaluation_datasets ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+    if "build_metadata_json" not in dataset_columns:
+        connection.execute("ALTER TABLE evaluation_datasets ADD COLUMN build_metadata_json TEXT NOT NULL DEFAULT '{}'")
     existing = connection.execute(
         "SELECT id FROM knowledge_bases WHERE id='KB-LOCAL-DEFAULT'"
     ).fetchone()
@@ -221,19 +253,29 @@ def default_knowledge_base_config() -> dict:
     }
 
 
-def create_knowledge_base(name: str, description: str = "", kb_type: str = "local") -> dict:
+def create_knowledge_base(
+    name: str,
+    description: str = "",
+    kb_type: str = "local",
+    created_by: str = "1",
+    created_by_department_id: str | int | None = None,
+) -> dict:
     knowledge_base_id = new_id("KB")
     timestamp = now_iso()
     config = default_knowledge_base_config()
     with connect() as connection:
         connection.execute(
-            "INSERT INTO knowledge_bases VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO knowledge_bases "
+            "(id, name, description, kb_type, config_json, created_by, created_by_department_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 knowledge_base_id,
                 name,
                 description,
                 kb_type,
                 json.dumps(config, ensure_ascii=False),
+                str(created_by),
+                str(created_by_department_id) if created_by_department_id is not None else None,
                 timestamp,
                 timestamp,
             ),
@@ -295,6 +337,8 @@ def _knowledge_base(row):
         "description": row["description"],
         "kb_type": row["kb_type"],
         "config": json.loads(row["config_json"] or "{}"),
+        "created_by": row["created_by"],
+        "created_by_department_id": row["created_by_department_id"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "document_count": row["document_count"] if "document_count" in keys else 0,
@@ -521,13 +565,44 @@ def _knowledge_view(row):
     }
 
 
-def create_evaluation_dataset(knowledge_base_id: str, name: str, cases: list[dict]) -> dict:
-    dataset_id = new_id("DATASET")
+def create_evaluation_dataset(
+    knowledge_base_id: str,
+    name: str,
+    cases: list[dict],
+    description: str = "",
+    build_metadata: dict | None = None,
+    dataset_id: str | None = None,
+) -> dict:
+    dataset_id = dataset_id or f"dataset_{uuid.uuid4().hex[:8]}"
     timestamp = now_iso()
+    metadata = build_metadata or {"source": "upload", "status": "completed", "progress": 100}
     with connect() as connection:
         connection.execute(
-            "INSERT INTO evaluation_datasets VALUES (?, ?, ?, ?, ?)",
-            (dataset_id, knowledge_base_id, name, json.dumps(cases, ensure_ascii=False), timestamp),
+            "INSERT INTO evaluation_datasets(id, knowledge_base_id, name, cases_json, created_at, description, build_metadata_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (dataset_id, knowledge_base_id, name, json.dumps(cases, ensure_ascii=False), timestamp, description,
+             json.dumps(metadata, ensure_ascii=False)),
+        )
+    return get_evaluation_dataset(knowledge_base_id, dataset_id)
+
+
+def update_evaluation_dataset(
+    knowledge_base_id: str,
+    dataset_id: str,
+    *,
+    cases: list[dict] | None = None,
+    build_metadata: dict | None = None,
+) -> dict | None:
+    current = get_evaluation_dataset(knowledge_base_id, dataset_id)
+    if not current:
+        return None
+    next_cases = current["cases"] if cases is None else cases
+    next_metadata = current["build_metadata"] if build_metadata is None else build_metadata
+    with connect() as connection:
+        connection.execute(
+            "UPDATE evaluation_datasets SET cases_json=?, build_metadata_json=? WHERE id=? AND knowledge_base_id=?",
+            (json.dumps(next_cases, ensure_ascii=False), json.dumps(next_metadata, ensure_ascii=False),
+             dataset_id, knowledge_base_id),
         )
     return get_evaluation_dataset(knowledge_base_id, dataset_id)
 
@@ -535,14 +610,10 @@ def create_evaluation_dataset(knowledge_base_id: str, name: str, cases: list[dic
 def list_evaluation_datasets(knowledge_base_id: str) -> list[dict]:
     with connect() as connection:
         rows = connection.execute(
-            "SELECT id, knowledge_base_id, name, created_at, cases_json FROM evaluation_datasets "
+            "SELECT * FROM evaluation_datasets "
             "WHERE knowledge_base_id=? ORDER BY created_at DESC", (knowledge_base_id,)
         ).fetchall()
-    return [
-        {"id": row["id"], "knowledge_base_id": row["knowledge_base_id"], "name": row["name"],
-         "case_count": len(json.loads(row["cases_json"])), "created_at": row["created_at"]}
-        for row in rows
-    ]
+    return [_evaluation_dataset(row, include_cases=False) for row in rows]
 
 
 def get_evaluation_dataset(knowledge_base_id: str, dataset_id: str) -> dict | None:
@@ -551,10 +622,29 @@ def get_evaluation_dataset(knowledge_base_id: str, dataset_id: str) -> dict | No
             "SELECT * FROM evaluation_datasets WHERE knowledge_base_id=? AND id=?",
             (knowledge_base_id, dataset_id),
         ).fetchone()
-    if not row:
-        return None
-    return {"id": row["id"], "knowledge_base_id": row["knowledge_base_id"], "name": row["name"],
-            "cases": json.loads(row["cases_json"]), "created_at": row["created_at"]}
+    return _evaluation_dataset(row) if row else None
+
+
+def _evaluation_dataset(row, *, include_cases: bool = True) -> dict:
+    cases = json.loads(row["cases_json"] or "[]")
+    metadata = json.loads(row["build_metadata_json"] or "{}")
+    result = {
+        "id": row["id"],
+        "dataset_id": row["id"],
+        "knowledge_base_id": row["knowledge_base_id"],
+        "kb_id": row["knowledge_base_id"],
+        "name": row["name"],
+        "description": row["description"],
+        "case_count": len(cases),
+        "item_count": len(cases),
+        "has_gold_chunks": any(item.get("gold_chunk_ids") for item in cases),
+        "has_gold_answers": any(item.get("gold_answer") for item in cases),
+        "build_metadata": metadata,
+        "created_at": row["created_at"],
+    }
+    if include_cases:
+        result["cases"] = cases
+    return result
 
 
 def delete_evaluation_dataset(dataset_id: str) -> bool:
@@ -565,7 +655,7 @@ def delete_evaluation_dataset(dataset_id: str) -> bool:
 
 
 def create_evaluation_run(knowledge_base_id: str, dataset_id: str | None, result: dict) -> dict:
-    run_id = new_id("RUN")
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
     timestamp = now_iso()
     with connect() as connection:
         connection.execute(

@@ -74,7 +74,9 @@ class TextDocumentRequest(BaseModel):
 
 class EvaluationCase(BaseModel):
     query: str = Field(min_length=1)
-    relevant_evidence_ids: list[str] = Field(min_length=1)
+    relevant_evidence_ids: list[str] = Field(default_factory=list)
+    gold_chunk_ids: list[str] = Field(default_factory=list)
+    gold_answer: str | None = None
     top_k: int = Field(default=5, ge=1, le=100)
     filters: dict[str, Any] = Field(default_factory=dict)
 
@@ -84,6 +86,8 @@ class EvaluationRequest(BaseModel):
     search_mode: Literal["hybrid", "keyword", "vector"] | None = None
     use_reranker: bool | None = None
     recall_top_k: int | None = Field(default=None, ge=1, le=200)
+    answer_llm: str | None = None
+    judge_llm: str | None = None
 
 
 class KnowledgeBasePayload(BaseModel):
@@ -113,6 +117,17 @@ class RerankerTestRequest(BaseModel):
     api_key: str = ""
     model: str = ""
     protocol: Literal["openai", "dashscope"] | None = None
+
+
+class EvaluationDatasetGeneratePayload(BaseModel):
+    name: str = Field(default="自动生成评估数据集", min_length=1, max_length=100)
+    description: str = ""
+    count: int = Field(default=10, ge=1, le=100)
+    neighbors_count: int = Field(default=1, ge=0, le=10)
+    concurrency_count: int = Field(default=10, ge=1, le=20)
+    llm_model_spec: str = Field(min_length=1)
+    generation_mode: Literal["vector", "graph_enhanced"] = "vector"
+    graph_expand_top_k: int = Field(default=1, ge=1, le=3)
 
 
 class FolderPayload(BaseModel):
@@ -148,6 +163,9 @@ class GraphConfigPayload(BaseModel):
 class EvaluationRunPayload(BaseModel):
     dataset_id: str | None = None
     cases: list[EvaluationCase] | None = Field(default=None, min_length=1, max_length=100)
+    name: str | None = Field(default=None, min_length=1, max_length=100)
     search_mode: Literal["hybrid", "keyword", "vector"] | None = None
     use_reranker: bool | None = None
     recall_top_k: int | None = Field(default=None, ge=1, le=200)
+    answer_llm: str | None = None
+    judge_llm: str | None = None

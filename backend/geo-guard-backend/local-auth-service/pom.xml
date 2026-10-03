@@ -18,6 +18,20 @@
       <artifactId>spring-boot-starter-web</artifactId>
     </dependency>
   </dependencies>
+  <repositories>
+    <repository>
+      <id>public</id>
+      <name>Public Maven mirror</name>
+      <url>https://mirrors.huaweicloud.com/repository/maven/</url>
+    </repository>
+  </repositories>
+  <pluginRepositories>
+    <pluginRepository>
+      <id>public</id>
+      <name>Public Maven mirror</name>
+      <url>https://mirrors.huaweicloud.com/repository/maven/</url>
+    </pluginRepository>
+  </pluginRepositories>
   <build>
     <plugins>
       <plugin>

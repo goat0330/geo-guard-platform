@@ -21,6 +21,12 @@
         :data-page-number="pageNum"
       >
         <canvas :ref="(el) => setCanvasRef(el, pageNum)" class="pdf-canvas" />
+        <div
+          v-if="pageNum === evidencePage && evidenceBoxStyle"
+          class="pdf-evidence-box"
+          :style="evidenceBoxStyle"
+          aria-label="检索证据在 PDF 中的位置"
+        />
         <div class="pdf-page-number-tag">{{ pageNum }} / {{ totalPages }}</div>
       </div>
     </div>
@@ -28,7 +34,7 @@
 </template>
 
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { CircleAlert, LoaderCircle } from '@lucide/vue'
 
 const props = defineProps({
@@ -40,6 +46,10 @@ const props = defineProps({
   horizontalPadding: {
     type: Number,
     default: 32
+  },
+  location: {
+    type: Object,
+    default: null
   }
 })
 
@@ -47,6 +57,7 @@ const containerRef = ref(null)
 const loading = ref(true)
 const error = ref('')
 const totalPages = ref(0)
+const evidenceBoxStyle = ref(null)
 
 const canvasMap = new Map()
 const renderTasks = new Map()
@@ -62,6 +73,51 @@ const setCanvasRef = (el, pageNum) => {
     canvasMap.set(pageNum, el)
   } else {
     canvasMap.delete(pageNum)
+  }
+}
+
+const evidencePage = computed(() => {
+  const page = Number(props.location?.page)
+  return Number.isInteger(page) && page > 0 && page <= totalPages.value ? page : null
+})
+
+const getEvidenceBbox = () => {
+  const bbox = props.location?.bbox
+  if (
+    !Array.isArray(bbox) ||
+    bbox.length !== 4 ||
+    bbox.some((value) => value === null || value === '' || !Number.isFinite(Number(value)))
+  ) {
+    return null
+  }
+  const [x0, y0, x1, y1] = bbox.map(Number)
+  return x1 > x0 && y1 > y0 ? [x0, y0, x1, y1] : null
+}
+
+const mapEvidenceBbox = (page, viewport, bbox) => {
+  const pageView = page.view
+  if (!pageView || pageView.length < 4) return null
+  const [x0, y0, x1, y1] = bbox
+  const top = pageView[3]
+  const left = pageView[0]
+  const points = [
+    viewport.convertToViewportPoint(left + x0, top - y0),
+    viewport.convertToViewportPoint(left + x1, top - y0),
+    viewport.convertToViewportPoint(left + x0, top - y1),
+    viewport.convertToViewportPoint(left + x1, top - y1)
+  ]
+  const xs = points.map(([x]) => x)
+  const ys = points.map(([, y]) => y)
+  const x = Math.min(...xs)
+  const y = Math.min(...ys)
+  const width = Math.max(...xs) - x
+  const height = Math.max(...ys) - y
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null
+  return {
+    left: `${x}px`,
+    top: `${y}px`,
+    width: `${width}px`,
+    height: `${height}px`
   }
 }
 
@@ -123,6 +179,11 @@ const renderSinglePage = async (pdfDoc, pageNum) => {
     const fitScale = calculateFitScale(page)
     const viewport = page.getViewport({ scale: fitScale })
 
+    if (pageNum === evidencePage.value) {
+      const bbox = getEvidenceBbox()
+      evidenceBoxStyle.value = bbox ? mapEvidenceBbox(page, viewport, bbox) : null
+    }
+
     // 支持 HiDPI / Retina 屏幕的高清绘制
     const outputScale = window.devicePixelRatio || 1
     const ctx = canvas.getContext('2d')
@@ -155,6 +216,9 @@ const renderSinglePage = async (pdfDoc, pageNum) => {
     renderTasks.set(pageNum, renderTask)
     await renderTask.promise
     renderTasks.delete(pageNum)
+    if (pageNum === evidencePage.value) {
+      canvas.closest('.pdf-page-card')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
   } catch (err) {
     if (err?.name !== 'RenderingCancelledException') {
       console.error(`渲染 PDF 第 ${pageNum} 页失败:`, err)
@@ -183,6 +247,7 @@ const loadPdf = async () => {
   loading.value = true
   error.value = ''
   totalPages.value = 0
+  evidenceBoxStyle.value = null
   cancelOngoingRenders()
 
   if (currentLoadingTask) {
@@ -237,6 +302,17 @@ watch(
   () => {
     loadPdf()
   }
+)
+
+watch(
+  () => props.location,
+  async () => {
+    evidenceBoxStyle.value = null
+    if (currentPdfDoc && evidencePage.value) {
+      await renderSinglePage(currentPdfDoc, evidencePage.value)
+    }
+  },
+  { deep: true }
 )
 
 onMounted(() => {
@@ -338,6 +414,16 @@ onBeforeUnmount(() => {
   box-shadow:
     0 6px 18px rgba(0, 0, 0, 0.1),
     0 2px 5px rgba(0, 0, 0, 0.05);
+}
+
+.pdf-evidence-box {
+  position: absolute;
+  z-index: 2;
+  border: 2px solid #dc2626;
+  border-radius: 2px;
+  background: rgba(239, 68, 68, 0.08);
+  box-sizing: border-box;
+  pointer-events: none;
 }
 
 .pdf-canvas {

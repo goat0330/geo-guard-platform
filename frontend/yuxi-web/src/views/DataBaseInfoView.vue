@@ -202,7 +202,12 @@
           v-show="activeTab === 'query'"
           class="tab-panel query-config-panel"
         >
-          <QuerySection ref="querySectionRef" :visible="true" @toggle-visible="() => {}" />
+          <QuerySection
+            ref="querySectionRef"
+            :visible="true"
+            @toggle-visible="() => {}"
+            @locate-evidence="onLocateEvidence"
+          />
         </div>
       </template>
 
@@ -228,7 +233,8 @@
       v-model:open="store.state.fileDetailModalVisible"
       :kb-id="kbId"
       :file-id="store.fileDetailFileId"
-      @closed="store.closeFileDetail"
+      :source-location="evidenceLocation"
+      @closed="onFileDetailClosed"
     />
 
     <FileUploadModal
@@ -790,6 +796,40 @@ const confirmBatchIndex = () => {
 const mindmapModalVisible = ref(false)
 const querySectionRef = ref(null)
 const searchConfigPanelRef = ref(null)
+const evidenceLocation = ref(null)
+
+const onLocateEvidence = (evidence) => {
+  const metadata = evidence?.metadata || {}
+  const fileId = String(metadata.file_id || '')
+  if (!fileId) {
+    message.error('检索证据缺少文件 ID，无法打开原文')
+    return
+  }
+
+  const page = Number(metadata.page)
+  const rawBbox = metadata.bbox
+  const bbox =
+    Array.isArray(rawBbox) &&
+    rawBbox.length === 4 &&
+    rawBbox.every(
+      (value) => value !== null && String(value).trim() !== '' && Number.isFinite(Number(value))
+    ) &&
+    Number(rawBbox[2]) > Number(rawBbox[0]) &&
+    Number(rawBbox[3]) > Number(rawBbox[1])
+      ? rawBbox.map(Number)
+      : null
+
+  evidenceLocation.value = {
+    page: Number.isInteger(page) && page > 0 ? page : null,
+    bbox
+  }
+  store.openFileDetail(fileId)
+}
+
+const onFileDetailClosed = () => {
+  evidenceLocation.value = null
+  store.closeFileDetail()
+}
 
 const addFilesModalVisible = ref(false)
 const fileSearchModalVisible = ref(false)

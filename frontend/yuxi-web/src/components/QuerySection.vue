@@ -97,6 +97,15 @@
                     <span v-if="chunk.distance !== undefined" class="metadata-item">
                       <strong>距离:</strong> {{ chunk.distance.toFixed(4) }}
                     </span>
+                    <a-button
+                      v-if="chunk.metadata?.file_id"
+                      type="link"
+                      size="small"
+                      class="locate-evidence-btn"
+                      @click="emit('locate-evidence', chunk)"
+                    >
+                      {{ hasPdfLocation(chunk) ? '定位原文' : '查看原文' }}
+                    </a-button>
                   </div>
                 </div>
               </div>
@@ -177,7 +186,23 @@ defineProps({
 })
 
 // 声明事件
-defineEmits(['toggleVisible'])
+const emit = defineEmits(['toggleVisible', 'locate-evidence'])
+
+const hasPdfLocation = (chunk) => {
+  const page = Number(chunk?.metadata?.page)
+  const bbox = chunk?.metadata?.bbox
+  return (
+    Number.isInteger(page) &&
+    page > 0 &&
+    Array.isArray(bbox) &&
+    bbox.length === 4 &&
+    bbox.every(
+      (value) => value !== null && String(value).trim() !== '' && Number.isFinite(Number(value))
+    ) &&
+    Number(bbox[2]) > Number(bbox[0]) &&
+    Number(bbox[3]) > Number(bbox[1])
+  )
+}
 
 const searchLoading = computed(() => store.state.searchLoading)
 const queryResult = ref('')

@@ -66,6 +66,12 @@ export default defineConfig(({ mode }) => {
           secure: false,
           rewrite: (path) => `/dizai/ai/rag${path}`,
         },
+        '^/api/tasks': {
+          target: env.VITE_APP_SERVER_URL || 'http://127.0.0.1:8007',
+          changeOrigin: true,
+          secure: false,
+          rewrite: (path) => `/dizai/ai/rag${path}`,
+        },
         '^/api/evaluation': {
           target: env.VITE_APP_SERVER_URL || 'http://127.0.0.1:8007',
           changeOrigin: true,

@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import zipfile
 from pathlib import Path
 
@@ -27,6 +28,27 @@ def _client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
+def _await_task_result(client, response):
+    assert response.status_code == 200, response.text
+    submission = response.json()
+    task_id = submission.get("task_id")
+    if not task_id:
+        return submission
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        task_response = client.get(f"/api/tasks/{task_id}")
+        assert task_response.status_code == 200, task_response.text
+        task = task_response.json()["task"]
+        if task["status"] in {"success", "failed", "cancelled"}:
+            result = {**submission, **(task.get("result") or {}), "status": task["status"], "task": task}
+            if submission.get("processed"):
+                result["processing_results"] = (task.get("result") or {}).get("processed", [])
+                result["processed"] = submission["processed"]
+            return result
+        time.sleep(0.02)
+    raise AssertionError(f"RAG task {task_id} did not finish")
+
+
 def test_native_delete_folder_recurses_and_reports_partial_failures(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     kb_id = client.post("/api/knowledge/databases", json={"database_name": "删除契约测试", "kb_type": "local"}).json()["kb_id"]
@@ -34,7 +56,7 @@ def test_native_delete_folder_recurses_and_reports_partial_failures(tmp_path, mo
     child = client.post(f"/api/knowledge/databases/{kb_id}/folders", json={"folder_name": "child", "parent_id": root}).json()["file_id"]
     staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
                          files={"file": ("删除样本.txt", "巡查裂缝与降雨。".encode(), "text/plain")}).json()
-    added = client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]], "params": {"auto_index": True}}).json()
+    added = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]], "params": {"auto_index": True}}))
     doc_id = added["processed"][0]["document_id"]
     assert db.get_chunks(doc_id)
     source_path = Path(db.get_document(doc_id)["file_path"])
@@ -155,16 +177,15 @@ def test_index_uses_and_persists_native_file_chunk_overrides(tmp_path, monkeypat
     text = "||".join(f"第{index}段降雨与裂缝巡查记录。" for index in range(30))
     staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
                          files={"file": ("巡查.txt", text.encode(), "text/plain")}).json()
-    added = client.post(f"/api/knowledge/databases/{kb_id}/documents",
-                        json={"items": [staged["file_path"]], "params": {"auto_index": False}}).json()
+    added = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents",
+                        json={"items": [staged["file_path"]], "params": {"auto_index": False}}))
     doc_id = added["processed"][0]["document_id"]
     params = {"chunk_preset_id": "separator", "chunk_parser_config":
               {"chunk_token_num": 64, "overlapped_percent": 0, "delimiter": "||"}}
-    indexed = client.post(f"/api/knowledge/databases/{kb_id}/documents/index",
-                          json={"file_ids": [doc_id], "params": params})
-    assert indexed.status_code == 200, indexed.text
-    assert indexed.json()["failed"] == []
-    assert indexed.json()["processed"][0]["chunk_preset_id"] == "separator"
+    indexed = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents/index",
+                          json={"file_ids": [doc_id], "params": params}))
+    assert indexed["failed"] == []
+    assert indexed["processed"][0]["chunk_preset_id"] == "separator"
     doc = db.get_document(doc_id)
     assert doc["chunk_preset_id"] == "separator"
     assert doc["chunk_parser_config"] == params["chunk_parser_config"]
@@ -179,12 +200,12 @@ def test_index_uses_and_persists_native_file_chunk_overrides(tmp_path, monkeypat
     expected_chunks = chunk_markdown(markdown_content=markdown, file_id=doc_id,
                                     filename="巡查.txt", processing_params=params)
     assert [item["text"] for item in chunks] == [item["content"].strip() for item in expected_chunks]
-    reindexed = client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [doc_id]})
-    assert reindexed.json()["failed"] == []
+    reindexed = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [doc_id]}))
+    assert reindexed["failed"] == []
     assert db.get_document(doc_id)["metadata"]["processing_params"] == expected_params
     partial_params = {"chunk_parser_config": {"chunk_token_num": 128}}
-    partial_index = client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [doc_id], "params": partial_params})
-    assert partial_index.json()["failed"] == []
+    partial_index = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [doc_id], "params": partial_params}))
+    assert partial_index["failed"] == []
     assert db.get_document(doc_id)["chunk_parser_config"] == {**params["chunk_parser_config"], "chunk_token_num": 128}
     assert db.get_knowledge_base(kb_id)["config"]["chunking"]["chunk_preset_id"] == "general"
 
@@ -194,12 +215,11 @@ def test_index_pending_forwards_native_chunk_params(tmp_path, monkeypatch):
     kb_id = client.post("/api/knowledge/databases", json={"database_name": "待入库参数", "kb_type": "local"}).json()["kb_id"]
     staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
                          files={"file": ("巡查.txt", "降雨||裂缝".encode(), "text/plain")}).json()
-    added = client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]]}).json()
+    added = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]]}))
     doc_id = added["processed"][0]["file_id"]
-    result = client.post(f"/api/knowledge/databases/{kb_id}/documents/index-pending",
-                         json={"params": {"chunk_preset_id": "separator", "chunk_parser_config": {"delimiter": "||"}}})
-    assert result.status_code == 200, result.text
-    assert result.json()["failed"] == []
+    result = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents/index-pending",
+                         json={"params": {"chunk_preset_id": "separator", "chunk_parser_config": {"delimiter": "||"}}}))
+    assert result["failed"] == []
     assert db.get_document(doc_id)["chunk_preset_id"] == "separator"
     assert db.get_document(doc_id)["chunk_parser_config"]["delimiter"] == "||"
 
@@ -230,13 +250,13 @@ def test_native_document_statistics_include_folders_and_pending_index(tmp_path, 
     client.post(f"/api/knowledge/databases/{kb_id}/folders", json={"folder_name": "资料"})
     staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
                          files={"file": ("巡查.txt", "降雨后巡查坡体裂缝".encode(), "text/plain")}).json()
-    added = client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]]}).json()
+    added = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]]}))
     doc_id = added["processed"][0]["file_id"]
     stats = client.get(f"/api/knowledge/databases/{kb_id}").json()["stats"]
     assert stats["row_count"] == 2 and stats["file_count"] == stats["folder_count"] == 1
     assert stats["pending_parse_count"] == 0 and stats["pending_index_count"] == 1
-    indexed = client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [doc_id]})
-    assert indexed.json()["failed"] == []
+    indexed = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [doc_id]}))
+    assert indexed["failed"] == []
     assert client.get(f"/api/knowledge/databases/{kb_id}").json()["stats"]["pending_index_count"] == 0
 
 
@@ -247,8 +267,8 @@ def test_native_failure_states_preserve_phase_and_recover_without_stale_errors(t
                       files={"file": ("broken.pdf", b"%PDF-invalid", "application/pdf")}).json()
     doc_id = client.post(f"/api/knowledge/databases/{kb_id}/documents/add",
                          json={"items": [bad["file_path"]]}).json()["items"][0]["file_id"]
-    parsed = client.post(f"/api/knowledge/databases/{kb_id}/documents/parse", json={"file_ids": [doc_id]})
-    assert len(parsed.json()["failed"]) == 1
+    parsed = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents/parse", json={"file_ids": [doc_id]}))
+    assert len(parsed["failed"]) == 1
     assert db.get_document(doc_id)["status"] == "failed"
     basic_url = f"/api/knowledge/databases/{kb_id}/documents/{doc_id}/basic"
     assert client.get(basic_url).json()["status"] == "error_parsing"
@@ -259,20 +279,20 @@ def test_native_failure_states_preserve_phase_and_recover_without_stale_errors(t
 
     staged = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id},
                          files={"file": ("巡查.txt", "巡查裂缝和位移".encode(), "text/plain")}).json()
-    indexed_id = client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]]}).json()["processed"][0]["file_id"]
+    indexed_id = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [staged["file_path"]]}))["processed"][0]["file_id"]
     from app import pipeline
     async def fail_embedding(*args):
         raise RuntimeError("Unit test embedding failure")
     with monkeypatch.context() as failure:
         failure.setattr(pipeline, "_embed_chunks", fail_embedding)
-        result = client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [indexed_id]})
-    assert len(result.json()["failed"]) == 1
+        result = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [indexed_id]}))
+    assert len(result["failed"]) == 1
     assert db.get_document(indexed_id)["metadata"]["failure_stage"] == "index"
     assert client.get(f"/api/knowledge/databases/{kb_id}/documents/{indexed_id}/basic").json()["status"] == "error_indexing"
     assert client.get(f"/api/knowledge/databases/{kb_id}").json()["stats"]["pending_index_count"] == 1
-    retry = client.post(f"/api/knowledge/databases/{kb_id}/documents/index-pending", json={})
-    assert retry.json()["failed"] == []
-    assert [item["document_id"] for item in retry.json()["processed"]] == [indexed_id]
+    retry = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents/index-pending", json={}))
+    assert retry["failed"] == []
+    assert [item["document_id"] for item in retry["processed"]] == [indexed_id]
     doc = db.get_document(indexed_id)
     assert doc["status"] == "indexed" and doc["error_message"] is None
     assert "indexing_error" not in doc["metadata"] and "failure_stage" not in doc["metadata"]
@@ -387,13 +407,11 @@ def test_yuxi_workspace_pdf_import_runs_real_document_pipeline(tmp_path, monkeyp
     assert added.json()["status"] == "success"
     document_id = added.json()["items"][0]["file_id"]
     assert db.get_document(document_id)["status"] == "uploaded"
-    parsed_result = client.post(f"/api/knowledge/databases/{kb_id}/documents/parse", json={"file_ids": [document_id]})
-    assert parsed_result.status_code == 200, parsed_result.text
-    assert parsed_result.json()["failed"] == []
+    parsed_result = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents/parse", json={"file_ids": [document_id]}))
+    assert parsed_result["failed"] == []
     assert db.get_document(document_id)["status"] == "parsed"
-    indexed_result = client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [document_id]})
-    assert indexed_result.status_code == 200, indexed_result.text
-    assert indexed_result.json()["failed"] == []
+    indexed_result = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents/index", json={"file_ids": [document_id]}))
+    assert indexed_result["failed"] == []
     document = next(row for row in client.get(f"/api/knowledge/databases/{kb_id}/documents").json()["items"] if row["file_id"] == document_id)
     assert document["status"] == "indexed"
     assert document["chunk_count"] > 0
@@ -497,6 +515,154 @@ def test_yuxi_database_config_persists_per_knowledge_base_and_masks_secrets(tmp_
     assert updated.json()["share_config"] == share_config
 
 
+def test_yuxi_knowledge_base_permissions_filter_reads_and_block_writes(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_headers = {
+        "X-Geo-User-Uid": "owner-10",
+        "X-Geo-User-Role": "admin",
+        "X-Geo-User-Department-Id": "17",
+    }
+    reader_headers = {
+        "X-Geo-User-Uid": "reader-20",
+        "X-Geo-User-Role": "user",
+        "X-Geo-User-Department-Id": "17",
+    }
+    outsider_headers = {
+        "X-Geo-User-Uid": "outsider-30",
+        "X-Geo-User-Role": "user",
+        "X-Geo-User-Department-Id": "99",
+    }
+    share_config = {
+        "version": 2,
+        "read_scope": {"access_level": "department", "department_ids": [17], "user_uids": []},
+        "manage_scope": None,
+    }
+    assert client.post(
+        "/api/knowledge/databases",
+        headers={**owner_headers, "X-Geo-User-Role": "user"},
+        json={"database_name": "forbidden"},
+    ).status_code == 403
+    invalid = client.post(
+        "/api/knowledge/databases",
+        headers=owner_headers,
+        json={
+            "database_name": "invalid share scope",
+            "share_config": {
+                "version": 2,
+                "read_scope": {"access_level": "user", "department_ids": [], "user_uids": []},
+                "manage_scope": None,
+            },
+        },
+    )
+    assert invalid.status_code == 422, invalid.text
+
+    created = client.post(
+        "/api/knowledge/databases",
+        headers=owner_headers,
+        json={"database_name": "共享权限", "share_config": share_config},
+    )
+    assert created.status_code == 200, created.text
+    kb_id = created.json()["kb_id"]
+    assert db.get_knowledge_base(kb_id)["created_by"] == "owner-10"
+    document_id = db.create_document(
+        "private.txt", str(tmp_path / "private.txt"), "text/plain", "text", "general", {}, {}, kb_id
+    )
+
+    assert client.get("/api/knowledge/databases", headers=reader_headers).status_code == 403
+    visible = client.get("/api/knowledge/databases/accessible", headers=reader_headers)
+    entry = next(item for item in visible.json()["databases"] if item["kb_id"] == kb_id)
+    assert entry["can_manage"] is False
+    assert client.get(f"/api/knowledge/databases/{kb_id}", headers=reader_headers).status_code == 200
+    assert client.get(f"/api/v1/documents/{document_id}/chunks", headers=reader_headers).status_code == 200
+    assert any(item["id"] == document_id for item in client.get("/api/v1/documents", headers=reader_headers).json())
+    assert client.post(
+        f"/api/knowledge/databases/{kb_id}/folders",
+        headers=reader_headers,
+        json={"folder_name": "should-not-create"},
+    ).status_code == 403
+
+    assert client.get("/api/knowledge/databases", headers=outsider_headers).status_code == 403
+    outsider_list = client.get("/api/knowledge/databases/accessible", headers=outsider_headers)
+    assert all(item["kb_id"] != kb_id for item in outsider_list.json()["databases"])
+    assert client.get(f"/api/knowledge/databases/{kb_id}", headers=outsider_headers).status_code == 403
+    assert client.get(f"/api/v1/documents/{document_id}/chunks", headers=outsider_headers).status_code == 403
+    assert all(item["id"] != document_id for item in client.get("/api/v1/documents", headers=outsider_headers).json())
+    assert client.put(
+        f"/api/knowledge/databases/{kb_id}",
+        headers=owner_headers,
+        json={"description": "owner can update"},
+    ).status_code == 200
+
+    preview = client.post(
+        "/api/knowledge/files/markdown",
+        headers=reader_headers,
+        data={"kb_id": kb_id},
+        files={"file": ("notes.txt", b"rainfall and slope movement", "text/plain")},
+    )
+    assert preview.status_code == 403, preview.text
+
+
+def test_yuxi_admin_only_knowledge_routes_match_upstream_roles(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    admin_headers = {"X-Geo-User-Uid": "admin-1", "X-Geo-User-Role": "admin"}
+    superadmin_headers = {"X-Geo-User-Uid": "superadmin-1", "X-Geo-User-Role": "superadmin"}
+    user_headers = {"X-Geo-User-Uid": "user-2", "X-Geo-User-Role": "user"}
+    created = client.post(
+        "/api/knowledge/databases",
+        headers=admin_headers,
+        json={"database_name": "Yuxi 角色边界", "kb_type": "local"},
+    )
+    assert created.status_code == 200, created.text
+    kb_id = created.json()["kb_id"]
+    dataset_upload = client.post(
+        f"/api/evaluation/databases/{kb_id}/datasets/upload",
+        headers=admin_headers,
+        data={"name": "角色边界评估集", "description": ""},
+        files={"file": ("dataset.jsonl", '{"query":"test","gold_chunk_ids":[]}', "application/x-ndjson")},
+    )
+    assert dataset_upload.status_code == 200, dataset_upload.text
+    dataset_id = dataset_upload.json()["data"]["dataset_id"]
+
+    accessible = client.get("/api/knowledge/databases/accessible", headers=user_headers)
+    assert accessible.status_code == 200, accessible.text
+    assert any(item["kb_id"] == kb_id for item in accessible.json()["databases"])
+
+    forbidden = [
+        client.get("/api/knowledge/databases", headers=user_headers),
+        client.post("/api/knowledge/databases", headers=user_headers, json={"database_name": "forbidden"}),
+        client.get("/api/knowledge/mindmap/databases", headers=user_headers),
+        client.post("/api/knowledge/files/fetch-url", headers=user_headers, json={}),
+        client.post("/api/knowledge/files/import-workspace", headers=user_headers, json={}),
+        client.post(f"/api/knowledge/files/upload?kb_id={kb_id}", headers=user_headers),
+        client.get("/api/knowledge/files/supported-types", headers=user_headers),
+        client.post("/api/knowledge/files/markdown", headers=user_headers),
+        client.get("/api/knowledge/types", headers=user_headers),
+        client.get("/api/knowledge/chunk-presets", headers=user_headers),
+        client.get("/api/knowledge/stats", headers=user_headers),
+        client.post("/api/knowledge/generate-description", headers=user_headers, json={}),
+        client.get("/api/graph/list", headers=user_headers),
+    ]
+    assert [response.status_code for response in forbidden] == [403] * len(forbidden)
+    assert all(response.json()["detail"] == "需要管理员权限" for response in forbidden)
+    for response in (
+        client.get(f"/api/evaluation/datasets/{dataset_id}/download", headers=user_headers),
+        client.delete(f"/api/evaluation/datasets/{dataset_id}", headers=user_headers),
+    ):
+        assert response.status_code == 403
+        assert response.json()["detail"] == "需要管理员权限"
+
+    assert client.get("/api/knowledge/databases", headers=admin_headers).status_code == 200
+    assert client.get("/api/knowledge/types", headers=admin_headers).status_code == 200
+    assert client.get("/api/graph/list", headers=admin_headers).status_code == 200
+    assert client.get(f"/api/evaluation/datasets/{dataset_id}/download", headers=admin_headers).status_code == 200
+    assert client.delete(f"/api/evaluation/datasets/{dataset_id}", headers=admin_headers).status_code == 200
+    for headers in (user_headers, admin_headers):
+        denied_stats = client.get("/api/dashboard/stats/knowledge", headers=headers)
+        assert denied_stats.status_code == 403
+        assert denied_stats.json()["detail"] == "需要超级管理员权限"
+    assert client.get("/api/dashboard/stats/knowledge", headers=superadmin_headers).status_code == 200
+
+
 @pytest.mark.parametrize("upload_mime_type", ["application/pdf", "application/octet-stream"])
 def test_yuxi_local_file_pipeline_and_retrieval_use_pdf(tmp_path, monkeypatch, pdf_sample, upload_mime_type):
     client = _client(tmp_path, monkeypatch)
@@ -525,13 +691,12 @@ def test_yuxi_local_file_pipeline_and_retrieval_use_pdf(tmp_path, monkeypatch, p
         )
     assert upload.status_code == 200, upload.text
     stage_uri = upload.json()["file_path"]
-    added = client.post(
+    added = _await_task_result(client, client.post(
         f"/api/knowledge/databases/{kb_id}/documents",
         json={"items": [stage_uri], "params": {"auto_index": True}},
-    )
-    assert added.status_code == 200, added.text
-    assert added.json()["status"] == "success"
-    document_id = added.json()["processed"][0]["document_id"]
+    ))
+    assert added["status"] == "success"
+    document_id = added["processed"][0]["document_id"]
 
     listed = client.get(f"/api/knowledge/databases/{kb_id}/documents")
     assert listed.status_code == 200
@@ -591,22 +756,27 @@ def test_yuxi_local_file_pipeline_and_retrieval_use_pdf(tmp_path, monkeypatch, p
 
     relevant_id = results.json()[0]["id"]
     dataset_payload = {
-        "name": "Yuxi 检索评估",
-        "cases": [{"query": "重庆市地质灾害应急预案", "relevant_evidence_ids": [relevant_id], "top_k": 3}],
+        "query": "重庆市地质灾害应急预案",
+        "gold_chunk_ids": [relevant_id.removeprefix("EV-")],
     }
     dataset_upload = client.post(
         f"/api/evaluation/databases/{kb_id}/datasets/upload",
         data={"name": "Yuxi 检索评估", "description": "真实 PDF 用例"},
-        files={"file": ("evaluation.json", json.dumps(dataset_payload, ensure_ascii=False), "application/json")},
+        files={"file": ("evaluation.jsonl", json.dumps(dataset_payload, ensure_ascii=False), "application/x-ndjson")},
     )
     assert dataset_upload.status_code == 200, dataset_upload.text
-    dataset_id = dataset_upload.json()["id"]
+    dataset_id = dataset_upload.json()["data"]["dataset_id"]
     evaluation = client.post(
         f"/api/evaluation/databases/{kb_id}/runs",
-        json={"dataset_id": dataset_id, "search_mode": "keyword"},
+        json={"dataset_id": dataset_id, "model_config": {"search_mode": "keyword"}},
     )
     assert evaluation.status_code == 200, evaluation.text
-    assert evaluation.json()["result"]["case_count"] == 1
+    assert evaluation.json()["message"] == "success"
+    run_id = evaluation.json()["data"]["run_id"]
+    run = client.get(f"/api/evaluation/databases/{kb_id}/runs/{run_id}")
+    assert run.status_code == 200, run.text
+    assert run.json()["data"]["total_items"] == 1
+    assert len(run.json()["data"]["items"]) == 1
 
 
 def test_yuxi_upload_rejects_duplicate_content_and_reports_same_name_versions(tmp_path, monkeypatch):
@@ -616,9 +786,9 @@ def test_yuxi_upload_rejects_duplicate_content_and_reports_same_name_versions(tm
     content = "雨后核查裂缝和位移。".encode()
     uploaded = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id}, files={"file": ("记录.txt", content, "text/plain")})
     assert uploaded.status_code == 200, uploaded.text
-    added = client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [uploaded.json()["file_path"]], "params": {"auto_index": True}})
-    assert added.json()["status"] == "success", added.text
-    file_id = added.json()["processed"][0]["document_id"]
+    added = _await_task_result(client, client.post(f"/api/knowledge/databases/{kb_id}/documents", json={"items": [uploaded.json()["file_path"]], "params": {"auto_index": True}}))
+    assert added["status"] == "success"
+    file_id = added["processed"][0]["document_id"]
     duplicate = client.post("/api/knowledge/files/upload", params={"kb_id": kb_id}, files={"file": ("改名.txt", content, "text/plain")})
     assert duplicate.status_code == 409, duplicate.text
     assert "same content" in duplicate.json()["detail"]
@@ -748,14 +918,13 @@ def test_yuxi_zip_folder_upload_indexes_supported_files_and_rejects_zip_slip(tmp
         files={"file": ("应急预案.zip", archive_bytes.getvalue(), "application/zip")},
     )
     assert upload.status_code == 200, upload.text
-    processed = client.post(
+    processed = _await_task_result(client, client.post(
         "/api/knowledge/files/process-folder",
         json={"file_path": upload.json()["file_path"], "content_hash": upload.json()["content_hash"], "kb_id": kb_id},
-    )
-    assert processed.status_code == 200, processed.text
-    assert processed.json()["status"] == "success"
-    assert len(processed.json()["processed"]) == 2
-    assert processed.json()["skipped_files"] == ["应急预案/忽略.bin"]
+    ))
+    assert processed["status"] == "success"
+    assert len(processed["processed"]) == 2
+    assert processed["skipped_files"] == ["应急预案/忽略.bin"]
     documents = client.get(f"/api/knowledge/databases/{kb_id}/documents", params={"recursive": True, "status": "indexed"})
     assert documents.status_code == 200
     rows = documents.json()["items"]

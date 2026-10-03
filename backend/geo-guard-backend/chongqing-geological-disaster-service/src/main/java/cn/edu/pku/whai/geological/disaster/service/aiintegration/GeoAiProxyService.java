@@ -3,6 +3,7 @@ package cn.edu.pku.whai.geological.disaster.service.aiintegration;
 import jakarta.servlet.http.HttpServletRequest;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.dromara.common.satoken.utils.LoginHelper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
@@ -52,11 +53,11 @@ public class GeoAiProxyService {
     }
 
     public ResponseEntity<byte[]> postRag(String path, JsonNode body) throws IOException, InterruptedException {
-        return postJson(ragBaseUrl, path, body);
+        return postJson(ragBaseUrl, path, body, true);
     }
 
     public ResponseEntity<byte[]> postGraph(String path, JsonNode body) throws IOException, InterruptedException {
-        return postJson(graphBaseUrl, path, body);
+        return postJson(graphBaseUrl, path, body, false);
     }
 
     public ProxyStream streamGraph(String path, JsonNode body) throws IOException, InterruptedException {
@@ -89,6 +90,7 @@ public class GeoAiProxyService {
                 servletRequest.getHeaders(name).asIterator().forEachRemaining(value -> builder.header(name, value));
             }
         });
+        addRagUserContext(builder);
         String accept = servletRequest.getHeader(HttpHeaders.ACCEPT);
         if (accept != null && !accept.toLowerCase(Locale.ROOT).contains("text/event-stream")) {
             builder.timeout(Duration.ofMinutes(5));
@@ -160,16 +162,24 @@ public class GeoAiProxyService {
             body.close();
         }
     }
-    private ResponseEntity<byte[]> postJson(String baseUrl, String path, JsonNode body)
+    private ResponseEntity<byte[]> postJson(String baseUrl, String path, JsonNode body, boolean includeUserContext)
             throws IOException, InterruptedException {
+        HttpRequest.Builder builder = requestBuilder(baseUrl, path, body, true);
+        if (includeUserContext) {
+            addRagUserContext(builder);
+        }
         HttpResponse<byte[]> response = httpClient.send(
-                request(baseUrl, path, body, true), HttpResponse.BodyHandlers.ofByteArray());
+                builder.build(), HttpResponse.BodyHandlers.ofByteArray());
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(contentType(response.headers().firstValue("Content-Type").orElse(null)));
         return new ResponseEntity<>(response.body(), headers, HttpStatusCode.valueOf(response.statusCode()));
     }
 
     private HttpRequest request(String baseUrl, String path, JsonNode body, boolean withTimeout) throws IOException {
+        return requestBuilder(baseUrl, path, body, withTimeout).build();
+    }
+
+    private HttpRequest.Builder requestBuilder(String baseUrl, String path, JsonNode body, boolean withTimeout) throws IOException {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl + path))
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .header(HttpHeaders.ACCEPT, withTimeout ? MediaType.APPLICATION_JSON_VALUE : MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -177,7 +187,32 @@ public class GeoAiProxyService {
         if (withTimeout) {
             builder.timeout(Duration.ofMinutes(5));
         }
-        return builder.build();
+        return builder;
+    }
+
+    private static void addRagUserContext(HttpRequest.Builder builder) {
+        String userId = LoginHelper.getUserIdStr();
+        if (userId == null || userId.isBlank()) {
+            // Embedded AI Studio keeps the local RAG workspace login-free.
+            return;
+        }
+
+        String role = "user";
+        try {
+            if (LoginHelper.isSuperAdmin()) {
+                role = "superadmin";
+            } else if (LoginHelper.isTenantAdmin()) {
+                role = "admin";
+            }
+        } catch (RuntimeException ignored) {
+            // Keep the authenticated user at the least-privileged role if role context is unavailable.
+        }
+        builder.header("X-Geo-User-Uid", userId);
+        builder.header("X-Geo-User-Role", role);
+        Long departmentId = LoginHelper.getDeptId();
+        if (departmentId != null) {
+            builder.header("X-Geo-User-Department-Id", departmentId.toString());
+        }
     }
 
     private static String trimSlash(String baseUrl) {

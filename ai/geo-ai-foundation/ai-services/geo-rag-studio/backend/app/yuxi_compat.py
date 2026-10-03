@@ -19,23 +19,70 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlsplit
 
 import httpx
-from fastapi import APIRouter, Body, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from . import db, main as rag
 from .chat import ChatProviderUnavailable, complete_chat
 from .config import settings
-from .schemas import DocumentBatchPayload, DocumentMovePayload, EmbeddingTestRequest, EvaluationRunPayload, GraphConfigPayload, KnowledgeBasePayload, KnowledgeBaseUpdatePayload, MindMapPayload, RerankerTestRequest, RetrieveRequest
+from .schemas import DocumentBatchPayload, DocumentMovePayload, EmbeddingTestRequest, EvaluationDatasetGeneratePayload, EvaluationRunPayload, GraphConfigPayload, KnowledgeBasePayload, KnowledgeBaseUpdatePayload, MindMapPayload, RerankerTestRequest, RetrieveRequest
 from .yuxi_port.chunk_presets import get_options
 from .parser import parse_file_markdown
 from .pipeline import document_processing_params
+from .permissions import can_manage as user_can_manage, can_read
+from .task_runtime import delete_task, get_task, list_tasks, public_task, request_cancel, submit_document_task, submit_evaluation_dataset_task
 from yuxi.knowledge.utils.kb_utils import calculate_content_hash, params_for_uploaded_document
 from yuxi.knowledge.utils.mindmap_utils import MINDMAP_FILE_PAGE_SIZE, build_database_file_list
 
 router = APIRouter()
 STAGE_URI = "local-stage://"
 DEFAULT_SHARE_CONFIG = {"version": 2, "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []}, "manage_scope": None}
+
+
+def _require_task_admin(request: Request) -> None:
+    if request.state.rag_user["role"] not in {"admin", "superadmin"}:
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+
+
+@router.get("/api/tasks")
+async def yuxi_list_tasks(
+    request: Request,
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=100),
+):
+    _require_task_admin(request)
+    return list_tasks(status=status, limit=limit)
+
+
+@router.get("/api/tasks/{task_id}")
+async def yuxi_get_task(task_id: str, request: Request):
+    _require_task_admin(request)
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"task": public_task(task)}
+
+
+@router.post("/api/tasks/{task_id}/cancel")
+async def yuxi_cancel_task(task_id: str, request: Request):
+    _require_task_admin(request)
+    task = request_cancel(task_id)
+    if not task:
+        raise HTTPException(status_code=400, detail="Task cannot be cancelled")
+    return {
+        "task_id": task_id,
+        "status": task["status"],
+        "cancel_requested": task["cancel_requested"],
+    }
+
+
+@router.delete("/api/tasks/{task_id}")
+async def yuxi_delete_task(task_id: str, request: Request):
+    _require_task_admin(request)
+    if not delete_task(task_id):
+        raise HTTPException(status_code=409, detail="Task must exist and be terminal before deletion")
+    return {"task_id": task_id, "status": "deleted"}
 
 
 def _yuxi_document_status(document: dict) -> str:
@@ -117,7 +164,7 @@ def _kb_stats(knowledge_base_id: str) -> dict:
     }
 
 
-def _yuxi_knowledge_base(knowledge_base: dict, include_files: bool = False) -> dict:
+def _yuxi_knowledge_base(knowledge_base: dict, include_files: bool = False, can_manage: bool = True) -> dict:
     public = rag._public_knowledge_base(knowledge_base)
     config = public.get("config") or {}
     embedding = config.get("embedding") or {}
@@ -155,7 +202,7 @@ def _yuxi_knowledge_base(knowledge_base: dict, include_files: bool = False) -> d
         "embedding_model_spec": embedding.get("model") or "",
         "additional_params": additional_params,
         "share_config": config.get("share_config") or DEFAULT_SHARE_CONFIG,
-        "can_manage": True,
+        "can_manage": can_manage,
         "row_count": public.get("document_count", 0),
         "stats": _kb_stats(public["id"]),
     }
@@ -330,13 +377,17 @@ async def yuxi_knowledge_dashboard_stats():
 
 
 @router.get("/api/knowledge/databases")
-async def yuxi_list_databases():
-    return {"databases": [_yuxi_knowledge_base(item) for item in db.list_knowledge_bases()]}
+async def yuxi_list_databases(request: Request):
+    user = request.state.rag_user
+    visible = [item for item in db.list_knowledge_bases() if can_read(user, item)]
+    return {"databases": [_yuxi_knowledge_base(item, can_manage=user_can_manage(user, item)) for item in visible]}
 
 
 @router.get("/api/knowledge/databases/accessible")
-async def yuxi_list_accessible_databases():
-    return {"databases": [_yuxi_knowledge_base(item) for item in db.list_knowledge_bases()]}
+async def yuxi_list_accessible_databases(request: Request):
+    user = request.state.rag_user
+    visible = [item for item in db.list_knowledge_bases() if can_read(user, item)]
+    return {"databases": [_yuxi_knowledge_base(item, can_manage=user_can_manage(user, item)) for item in visible]}
 
 
 class ExternalRetrieveRequest(BaseModel):
@@ -354,7 +405,8 @@ class ExternalFindRequest(BaseModel):
 
 
 @router.get("/api/knowledge/databases/external")
-async def yuxi_list_external_databases():
+async def yuxi_list_external_databases(request: Request):
+    user = request.state.rag_user
     return {
         "databases": [
             {
@@ -365,6 +417,7 @@ async def yuxi_list_external_databases():
                 "supports_documents": item["kb_type"] == "local",
             }
             for item in db.list_knowledge_bases()
+            if can_read(user, item)
         ]
     }
 
@@ -508,23 +561,30 @@ async def yuxi_find_external_file(kb_id: str, file_id: str, payload: ExternalFin
 
 
 @router.post("/api/knowledge/databases")
-async def yuxi_create_database(payload: dict = Body(...)):
+async def yuxi_create_database(http_request: Request, payload: dict = Body(...)):
     name = str(payload.get("database_name") or payload.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="知识库名称不能为空")
     kb_type = str(payload.get("kb_type") or "local")
     if kb_type not in {"local", "dify", "notion"}:
         raise HTTPException(status_code=422, detail="当前本地服务不支持该知识库类型")
-    config = _config_from_yuxi(payload)
+    try:
+        config = _config_from_yuxi(payload)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     request = KnowledgeBasePayload(name=name, description=str(payload.get("description") or ""), kb_type=kb_type, config=config)
-    created = await rag.create_knowledge_base(request)
+    created = await rag.create_knowledge_base(request, http_request)
     return _yuxi_knowledge_base(created, include_files=True)
 
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}")
-async def yuxi_get_database(knowledge_base_id: str):
+async def yuxi_get_database(knowledge_base_id: str, request: Request):
     knowledge_base = rag._knowledge_base_or_404(knowledge_base_id)
-    return _yuxi_knowledge_base(knowledge_base, include_files=True)
+    return _yuxi_knowledge_base(
+        knowledge_base,
+        include_files=True,
+        can_manage=bool(getattr(request.state, "rag_can_manage", False)),
+    )
 
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}/export")
@@ -596,7 +656,10 @@ async def yuxi_export_database(
 @router.put("/api/knowledge/databases/{knowledge_base_id}")
 async def yuxi_update_database(knowledge_base_id: str, payload: dict = Body(...)):
     current = rag._knowledge_base_or_404(knowledge_base_id)
-    config = _config_from_yuxi(payload, current.get("config"))
+    try:
+        config = _config_from_yuxi(payload, current.get("config"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     request = KnowledgeBaseUpdatePayload(
         name=payload.get("name") or payload.get("database_name"),
         description=payload.get("description"),
@@ -1318,7 +1381,21 @@ async def yuxi_import_workspace_files(payload: dict = Body(...)):
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/documents")
 async def yuxi_add_documents(knowledge_base_id: str, payload: dict = Body(...)):
-    return await _add_documents(knowledge_base_id, payload, parse_after_upload=True)
+    result = await _add_documents(knowledge_base_id, payload, parse_after_upload=False)
+    document_ids = [entry["file_id"] for entry in result["processed"]]
+    if not document_ids:
+        return result
+    submission = submit_document_task(
+        knowledge_base_id,
+        document_ids,
+        "ingest",
+        auto_index=bool((payload.get("params") or {}).get("auto_index")),
+    )
+    return {
+        **result,
+        **submission,
+        "message": f"已添加 {len(document_ids)} 个文件，后台开始解析和入库",
+    }
 
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/documents/add")
@@ -1419,26 +1496,37 @@ def _batch_request(payload: dict) -> DocumentBatchPayload:
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/documents/parse")
 async def yuxi_parse_documents(knowledge_base_id: str, payload: dict = Body(...)):
-    result = await rag.parse_knowledge_base_documents(knowledge_base_id, _batch_request(payload))
-    return {**result, "status": "success" if not result["failed"] else "partial", "message": f"解析完成 {len(result['processed'])} 个，失败 {len(result['failed'])} 个"}
+    rag._knowledge_base_or_404(knowledge_base_id)
+    request = _batch_request(payload)
+    return submit_document_task(knowledge_base_id, request.document_ids, "parse", request.params)
 
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/documents/parse-pending")
 async def yuxi_parse_pending(knowledge_base_id: str, payload: dict = Body(default={} )):
-    result = await rag.parse_pending_knowledge_base_documents(knowledge_base_id, payload.get("params") or {})
-    return {**result, "status": "success" if not result["failed"] else "partial", "message": f"解析完成 {len(result['processed'])} 个，失败 {len(result['failed'])} 个"}
+    rag._knowledge_base_or_404(knowledge_base_id)
+    document_ids = [
+        document["id"] for document in db.list_documents(knowledge_base_id)
+        if document["status"] == "uploaded"
+    ]
+    return submit_document_task(knowledge_base_id, document_ids, "parse", payload.get("params") or {})
 
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/documents/index")
 async def yuxi_index_documents(knowledge_base_id: str, payload: dict = Body(...)):
-    result = await rag.index_knowledge_base_documents(knowledge_base_id, _batch_request(payload))
-    return {**result, "status": "success" if not result["failed"] else "partial", "message": f"入库完成 {len(result['processed'])} 个，失败 {len(result['failed'])} 个"}
+    rag._knowledge_base_or_404(knowledge_base_id)
+    request = _batch_request(payload)
+    return submit_document_task(knowledge_base_id, request.document_ids, "index", request.params)
 
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/documents/index-pending")
 async def yuxi_index_pending(knowledge_base_id: str, payload: dict = Body(default={} )):
-    result = await rag.index_pending_knowledge_base_documents(knowledge_base_id, payload.get("params") or {})
-    return {**result, "status": "success" if not result["failed"] else "partial", "message": f"入库完成 {len(result['processed'])} 个，失败 {len(result['failed'])} 个"}
+    rag._knowledge_base_or_404(knowledge_base_id)
+    document_ids = [
+        document["id"] for document in db.list_documents(knowledge_base_id)
+        if document["status"] == "parsed"
+        or (document["status"] == "failed" and (document.get("metadata") or {}).get("failure_stage") == "index")
+    ]
+    return submit_document_task(knowledge_base_id, document_ids, "index", payload.get("params") or {})
 
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}/documents/{document_id}/basic")
@@ -1782,8 +1870,13 @@ async def yuxi_save_sample_questions(knowledge_base_id: str, payload: dict = Bod
 
 
 @router.get("/api/knowledge/mindmap/databases")
-async def yuxi_mindmap_databases():
-    return [_yuxi_knowledge_base(item) for item in db.list_knowledge_bases() if item["kb_type"] == "local"]
+async def yuxi_mindmap_databases(request: Request):
+    user = request.state.rag_user
+    return [
+        _yuxi_knowledge_base(item, can_manage=user_can_manage(user, item))
+        for item in db.list_knowledge_bases()
+        if item["kb_type"] == "local" and can_read(user, item)
+    ]
 
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}/mindmap/files")
@@ -1991,24 +2084,56 @@ async def yuxi_graph_labels(kb_id: str):
 
 @router.post("/api/evaluation/databases/{knowledge_base_id}/datasets/upload")
 async def yuxi_upload_eval_dataset(knowledge_base_id: str, file: UploadFile = File(...), name: str = Form(""), description: str = Form("")):
-    return await rag.upload_evaluation_dataset(knowledge_base_id, file)
+    if Path(file.filename or "").suffix.lower() != ".jsonl":
+        raise HTTPException(status_code=400, detail="仅支持JSONL格式文件")
+    dataset = await rag.upload_evaluation_dataset(knowledge_base_id, file, name=name, description=description)
+    return {"message": "success", "data": dataset}
 
 
 @router.get("/api/evaluation/databases/{knowledge_base_id}/datasets")
 async def yuxi_list_eval_datasets(knowledge_base_id: str):
-    return await rag.list_knowledge_base_evaluation_datasets(knowledge_base_id)
+    datasets = await rag.list_knowledge_base_evaluation_datasets(knowledge_base_id)
+    return {"message": "success", "data": datasets}
 
 
 @router.get("/api/evaluation/databases/{knowledge_base_id}/datasets/{dataset_id}")
 async def yuxi_get_eval_dataset(knowledge_base_id: str, dataset_id: str, page: int = 1, page_size: int = 50):
-    return await rag.get_knowledge_base_evaluation_dataset(knowledge_base_id, dataset_id, page, page_size)
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise HTTPException(status_code=400, detail="页码或分页大小无效")
+    dataset = await rag.get_knowledge_base_evaluation_dataset(knowledge_base_id, dataset_id, page, page_size)
+    if dataset.get("build_metadata", {}).get("status", "completed") not in {"completed", "failed"}:
+        raise HTTPException(status_code=400, detail="Dataset is not ready")
+    cases = dataset.pop("cases", [])
+    start = (page - 1) * page_size
+    dataset["items"] = [
+        {
+            "item_id": f"{dataset_id}_{start + index + 1}",
+            "item_index": start + index,
+            "query": item.get("query", ""),
+            "gold_chunk_ids": item.get("gold_chunk_ids", []),
+            "gold_answer": item.get("gold_answer"),
+        }
+        for index, item in enumerate(cases)
+    ]
+    total = int(dataset.get("item_count", dataset.get("case_count", len(cases))))
+    total_pages = (total + page_size - 1) // page_size
+    dataset["pagination"] = {
+        "current_page": page,
+        "page_size": page_size,
+        "total_items": total,
+        "total_pages": total_pages,
+        "has_next": page < total_pages,
+        "has_prev": page > 1,
+    }
+    return {"message": "success", "data": dataset}
 
 
 @router.delete("/api/evaluation/datasets/{dataset_id}")
 async def yuxi_delete_eval_dataset(dataset_id: str):
     for item in db.list_knowledge_bases():
         if db.get_evaluation_dataset(item["id"], dataset_id):
-            return await rag.delete_knowledge_base_evaluation_dataset(item["id"], dataset_id)
+            await rag.delete_knowledge_base_evaluation_dataset(item["id"], dataset_id)
+            return {"message": "success", "data": None}
     raise HTTPException(status_code=404, detail="评估集不存在")
 
 
@@ -2017,33 +2142,172 @@ async def yuxi_download_eval_dataset(dataset_id: str):
     for item in db.list_knowledge_bases():
         dataset = db.get_evaluation_dataset(item["id"], dataset_id)
         if dataset:
-            content = json.dumps(dataset, ensure_ascii=False, indent=2).encode("utf-8")
-            return Response(content=content, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{dataset_id}.json"'})
+            if dataset["build_metadata"].get("status", "completed") != "completed":
+                raise HTTPException(status_code=400, detail="Dataset is not ready")
+            lines = []
+            for case in dataset["cases"]:
+                value = {"query": case["query"]}
+                if case.get("gold_chunk_ids"):
+                    value["gold_chunk_ids"] = case["gold_chunk_ids"]
+                if case.get("gold_answer"):
+                    value["gold_answer"] = case["gold_answer"]
+                lines.append(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+            content = ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
+            filename = re.sub(r'[\\/:*?"<>|]+', "_", str(dataset.get("name") or dataset_id)).strip()
+            filename = (filename or dataset_id).removesuffix(".jsonl") + ".jsonl"
+            return Response(
+                content=content,
+                media_type="application/x-ndjson",
+                headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+            )
     raise HTTPException(status_code=404, detail="评估集不存在")
 
 
 @router.post("/api/evaluation/databases/{knowledge_base_id}/datasets/generate")
 @router.post("/api/evaluation/databases/{knowledge_base_id}/datasets/{dataset_id}/resume")
 async def yuxi_generate_eval_dataset(knowledge_base_id: str, dataset_id: str | None = None, payload: dict = Body(default={} )):
-    raise HTTPException(status_code=503, detail="评估集生成需要配置可用的 LLM；本地服务不会生成伪造数据")
+    try:
+        if dataset_id:
+            result = submit_evaluation_dataset_task(knowledge_base_id, {}, dataset_id=dataset_id)
+        else:
+            request = EvaluationDatasetGeneratePayload.model_validate(payload)
+            result = submit_evaluation_dataset_task(knowledge_base_id, request.model_dump())
+        return {"message": "success", "data": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _evaluation_run_summary(run: dict) -> dict:
+    result = run.get("result") or {}
+    metrics = result.get("averages") or {}
+    created_at = run.get("created_at")
+    date_part = str(created_at or "").replace("-", "")[:8] or "unknown"
+    return {
+        "run_id": run["id"],
+        "name": result.get("name") or f"eval-{date_part}-{run['id'][-6:]}",
+        "dataset_id": run.get("dataset_id"),
+        "status": "failed" if result.get("error") else "completed",
+        "started_at": created_at,
+        "completed_at": created_at,
+        "total_items": result.get("case_count", len(result.get("cases") or [])),
+        "completed_items": result.get("case_count", len(result.get("cases") or [])),
+        "overall_score": metrics.get("overall_score"),
+        "retrieval_config": result.get("retrieval_config") or {},
+        "metrics": metrics,
+    }
+
+
+def _evaluation_result_matches(item: dict, result_filter: str) -> bool:
+    metrics = item.get("metrics") or {}
+    answer_error = metrics.get("score", 1.0) <= 0.5
+    if result_filter == "answer_errors":
+        return answer_error
+    if result_filter == "legacy_errors":
+        return answer_error or any(
+            metrics.get(key, 1.0) < 0.3 for key in metrics if key.startswith("recall@")
+        )
+    if result_filter == "errors_or_low_recall":
+        return answer_error or metrics.get("recall@10", 1.0) < 1
+    return True
 
 
 @router.post("/api/evaluation/databases/{knowledge_base_id}/runs")
 async def yuxi_run_eval(knowledge_base_id: str, payload: dict = Body(...)):
-    request = EvaluationRunPayload.model_validate(payload)
-    return await rag.run_knowledge_base_evaluation(knowledge_base_id, request)
+    model_config = payload.get("model_config") or {}
+    if not isinstance(model_config, dict):
+        raise HTTPException(status_code=422, detail="model_config 必须是对象")
+    request = EvaluationRunPayload.model_validate({
+        "dataset_id": payload.get("dataset_id"),
+        "name": payload.get("name"),
+        "search_mode": model_config.get("search_mode", payload.get("search_mode")),
+        "use_reranker": model_config.get("use_reranker", payload.get("use_reranker")),
+        "recall_top_k": model_config.get("recall_top_k", payload.get("recall_top_k")),
+        "answer_llm": model_config.get("answer_llm") or None,
+        "judge_llm": model_config.get("judge_llm") or None,
+    })
+    run = await rag.run_knowledge_base_evaluation(knowledge_base_id, request)
+    return {"message": "success", "data": {"run_id": run["id"]}}
 
 
 @router.get("/api/evaluation/databases/{knowledge_base_id}/runs")
 async def yuxi_list_eval_runs(knowledge_base_id: str):
-    return await rag.list_knowledge_base_evaluation_runs(knowledge_base_id)
+    run_rows = await rag.list_knowledge_base_evaluation_runs(knowledge_base_id)
+    runs = [db.get_evaluation_run(knowledge_base_id, item["id"]) for item in run_rows]
+    return {"message": "success", "data": [_evaluation_run_summary(run) for run in runs if run]}
 
 
 @router.get("/api/evaluation/databases/{knowledge_base_id}/runs/{run_id}")
-async def yuxi_get_eval_run(knowledge_base_id: str, run_id: str, page: int = 1, page_size: int = 50, result_filter: str | None = None, error_only: bool | None = None):
-    return await rag.get_knowledge_base_evaluation_run(knowledge_base_id, run_id)
+async def yuxi_get_eval_run(
+    knowledge_base_id: str,
+    run_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    result_filter: str | None = None,
+    error_only: bool | None = None,
+):
+    if result_filter not in {None, "all", "answer_errors", "errors_or_low_recall"}:
+        raise HTTPException(status_code=400, detail="无效的评估结果筛选条件")
+    if result_filter is not None and error_only:
+        raise HTTPException(status_code=400, detail="不能同时使用 result_filter 和 error_only")
+    run = await rag.get_knowledge_base_evaluation_run(knowledge_base_id, run_id)
+    summary = _evaluation_run_summary(run)
+    result = run.get("result") or {}
+    result_filter = "legacy_errors" if error_only else result_filter or "all"
+    items = result.get("cases") or []
+    filtered = [item for item in items if _evaluation_result_matches(item, result_filter)]
+    start = (page - 1) * page_size
+    page_items = []
+    for index, item in enumerate(filtered[start:start + page_size], start=start):
+        retrieved_chunks = []
+        for chunk in item.get("retrieved_chunks") or []:
+            metadata = dict(chunk.get("metadata") or {})
+            metadata.update(
+                chunk_id=chunk.get("chunk_id"),
+                file_id=chunk.get("document_id"),
+                file_name=chunk.get("file_name"),
+                page=chunk.get("page"),
+                bbox=chunk.get("bbox"),
+            )
+            retrieved_chunks.append({
+                "chunk_id": chunk.get("chunk_id"),
+                "content": chunk.get("text") or chunk.get("content") or "",
+                "metadata": metadata,
+                "score": (chunk.get("scores") or {}).get("fusion"),
+            })
+        page_items.append({
+            "item_index": item.get("item_index", index),
+            "query": item.get("query", ""),
+            "gold_chunk_ids": item.get("gold_chunk_ids") or [],
+            "gold_answer": item.get("gold_answer"),
+            "generated_answer": item.get("generated_answer") or "",
+            "retrieved_chunks": retrieved_chunks,
+            "metrics": item.get("metrics") or {},
+        })
+    total = len(filtered)
+    total_pages = (total + page_size - 1) // page_size
+    return {"message": "success", "data": {
+        "run_id": summary["run_id"],
+        "name": summary["name"],
+        "status": summary["status"],
+        "started_at": summary["started_at"],
+        "completed_at": summary["completed_at"],
+        "total_items": summary["total_items"],
+        "completed_items": summary["completed_items"],
+        "overall_score": summary["overall_score"],
+        "retrieval_config": summary["retrieval_config"],
+        "items": page_items,
+        "pagination": {
+            "current_page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "result_filter": result_filter,
+            "error_only": result_filter == "legacy_errors",
+        },
+    }}
 
 
 @router.delete("/api/evaluation/databases/{knowledge_base_id}/runs/{run_id}")
 async def yuxi_delete_eval_run(knowledge_base_id: str, run_id: str):
-    return await rag.delete_knowledge_base_evaluation_run(knowledge_base_id, run_id)
+    await rag.delete_knowledge_base_evaluation_run(knowledge_base_id, run_id)
+    return {"message": "success", "data": None}

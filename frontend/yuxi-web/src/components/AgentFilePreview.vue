@@ -209,7 +209,7 @@
         </div>
       </template>
       <template v-else-if="file?.previewType === 'pdf' && file?.previewUrl">
-        <PdfPreview :url="file.previewUrl" class="pdf-preview" />
+        <PdfPreview :url="file.previewUrl" :location="location" class="pdf-preview" />
       </template>
       <template v-else-if="isHtmlFile && htmlPreviewMode === 'render'">
         <iframe
@@ -324,7 +324,11 @@
               </div>
             </template>
             <template v-else-if="file?.previewType === 'pdf' && file?.previewUrl">
-              <PdfPreview :url="file.previewUrl" class="pdf-preview fullscreen-embed-preview" />
+              <PdfPreview
+                :url="file.previewUrl"
+                :location="location"
+                class="pdf-preview fullscreen-embed-preview"
+              />
             </template>
             <template v-else-if="isHtmlFile && htmlPreviewMode === 'render'">
               <iframe
@@ -401,6 +405,10 @@ const props = defineProps({
   filePath: {
     type: String,
     default: ''
+  },
+  location: {
+    type: Object,
+    default: null
   },
   status: {
     type: String,

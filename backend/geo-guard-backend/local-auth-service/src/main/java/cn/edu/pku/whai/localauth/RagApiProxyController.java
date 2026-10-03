@@ -33,9 +33,11 @@ public class RagApiProxyController {
     private static final String KNOWLEDGE_PREFIX = "/api/knowledge";
     private static final String EVALUATION_PREFIX = "/api/evaluation";
     private static final String GRAPH_PREFIX = "/api/graph";
+    private static final String WORKSPACE_PREFIX = "/api/workspace";
     private static final Set<String> REQUEST_HEADERS = Set.of("accept", "content-type");
     private static final Set<String> RESPONSE_HEADERS = Set.of(
-        "content-type", "content-disposition", "cache-control", "etag", "last-modified", "retry-after"
+        "content-type", "content-disposition", "cache-control", "etag", "last-modified", "retry-after",
+        "x-yuxi-preview-type", "x-yuxi-preview-filename"
     );
 
     private final HttpClient client;
@@ -53,7 +55,8 @@ public class RagApiProxyController {
         path = {PREFIX, PREFIX + "/**", RAG_API_PREFIX, RAG_API_PREFIX + "/**",
             KNOWLEDGE_PREFIX, KNOWLEDGE_PREFIX + "/**",
             EVALUATION_PREFIX, EVALUATION_PREFIX + "/**",
-            GRAPH_PREFIX, GRAPH_PREFIX + "/**"},
+            GRAPH_PREFIX, GRAPH_PREFIX + "/**",
+            WORKSPACE_PREFIX, WORKSPACE_PREFIX + "/**"},
         method = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.PATCH,
             RequestMethod.DELETE, RequestMethod.HEAD}
     )
@@ -66,6 +69,8 @@ public class RagApiProxyController {
             } else if (uri.startsWith(EVALUATION_PREFIX)) {
                 path = uri;
             } else if (uri.startsWith(GRAPH_PREFIX)) {
+                path = uri;
+            } else if (uri.startsWith(WORKSPACE_PREFIX)) {
                 path = uri;
             } else if (uri.startsWith(RAG_API_PREFIX)) {
                 path = uri.substring(RAG_API_PREFIX.length());

@@ -9,20 +9,31 @@ import uuid
 import zipfile
 import json
 import mimetypes
+from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import json_repair
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from . import db, milvus_store
+from .chat import ChatProviderUnavailable, complete_chat
 from .config import settings
 from .provider_store import resolve_runtime_config
 from .embedding import embed_texts, enabled as embedding_enabled, value as embedding_value
 from .parser import parse_pdf_layout, parse_pdf_mineru, parse_pdf_mineru_official, render_pdf_page
 from .pipeline import index_existing_document, ingest_file, ingest_pdf, ingest_text, parse_existing_document
+from .permissions import (
+    ResourcePermission,
+    can_read,
+    normalize_share_config,
+    permission_for,
+    request_user,
+    require_access,
+)
 from .knowledge_features import (
     build_entity_graph,
     generate_mindmap,
@@ -63,7 +74,15 @@ from .schemas import (
 from .yuxi_port.chunk_presets import get_options, normalize_chunk_config, normalize_preset
 from .yuxi_port.ragflow_like.nlp import count_tokens
 
-app = FastAPI(title="Geo RAG Studio API", version="0.2.0")
+@asynccontextmanager
+async def _lifespan(_app):
+    from .task_runtime import resume_pending_tasks
+
+    resume_pending_tasks()
+    yield
+
+
+app = FastAPI(title="Geo RAG Studio API", version="0.2.0", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -71,6 +90,141 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
+
+
+async def _request_knowledge_base_ids(request: Request) -> list[str]:
+    parts = request.url.path.strip("/").split("/")
+    ids: list[str] = []
+    if len(parts) >= 4 and parts[:3] in (["api", "knowledge", "databases"], ["api", "evaluation", "databases"]):
+        if parts[3] not in {"external", "accessible"}:
+            ids.append(parts[3])
+    elif len(parts) >= 5 and parts[:4] == ["api", "knowledge", "databases", "external"]:
+        ids.append(parts[4])
+    elif len(parts) >= 4 and parts[:3] == ["api", "v1", "knowledge-bases"]:
+        ids.append(parts[3])
+
+    query_id = request.query_params.get("kb_id") or request.query_params.get("knowledge_base_id")
+    if query_id:
+        ids.append(query_id)
+    document_id = request.query_params.get("document_id") or request.query_params.get("file_id")
+    document_index = next((index for index, part in enumerate(parts[:-1]) if part == "documents"), None)
+    if document_index is not None:
+        document_id = document_id or parts[document_index + 1]
+    if document_id:
+        document = db.get_document(document_id)
+        if document and document.get("knowledge_base_id"):
+            ids.append(document["knowledge_base_id"])
+    if len(parts) >= 4 and parts[:3] == ["api", "evaluation", "datasets"]:
+        dataset_id = parts[3]
+        for knowledge_base in db.list_knowledge_bases():
+            if db.get_evaluation_dataset(knowledge_base["id"], dataset_id):
+                ids.append(knowledge_base["id"])
+                break
+    body_paths = {
+        "/api/v1/retrieve", "/api/v1/debug/retrieve", "/api/v1/documents/upload",
+        "/api/v1/documents/pdf", "/api/v1/documents/text", "/api/knowledge/files/markdown",
+        "/api/knowledge/files/process-folder", "/api/knowledge/files/import-workspace",
+    }
+    if request.url.path in body_paths and request.method in {"POST", "PUT", "PATCH"}:
+        content_type = request.headers.get("content-type", "").lower()
+        try:
+            raw_body = await request.body()
+            body_replayed = False
+
+            async def replay_body():
+                nonlocal body_replayed
+                if body_replayed:
+                    return {"type": "http.disconnect"}
+                body_replayed = True
+                return {"type": "http.request", "body": raw_body, "more_body": False}
+
+            if "application/json" in content_type:
+                payload = request.state.permission_payload = await request.json()
+            elif "multipart/form-data" in content_type:
+                payload = request.state.permission_payload = await request.form()
+            else:
+                payload = None
+            request._receive = replay_body
+        except (ValueError, RuntimeError):
+            payload = None
+
+        if isinstance(payload, dict) or hasattr(payload, "get"):
+            for key in ("knowledge_base_id", "kb_id", "database_id"):
+                value = payload.get(key)
+                if value:
+                    ids.append(str(value))
+            filters = payload.get("filters")
+            if isinstance(filters, dict) and filters.get("knowledge_base_id"):
+                ids.append(str(filters["knowledge_base_id"]))
+
+    return list(dict.fromkeys(value for value in ids if value))
+
+
+YUXI_ADMIN_ENDPOINTS = {
+    ("GET", "/api/knowledge/databases"),
+    ("POST", "/api/knowledge/databases"),
+    ("GET", "/api/knowledge/mindmap/databases"),
+    ("POST", "/api/knowledge/files/fetch-url"),
+    ("POST", "/api/knowledge/files/import-workspace"),
+    ("POST", "/api/knowledge/files/upload"),
+    ("GET", "/api/knowledge/files/supported-types"),
+    ("POST", "/api/knowledge/files/markdown"),
+    ("GET", "/api/knowledge/types"),
+    ("GET", "/api/knowledge/chunk-presets"),
+    ("GET", "/api/knowledge/stats"),
+    ("POST", "/api/knowledge/generate-description"),
+    ("GET", "/api/graph/list"),
+}
+YUXI_SUPERADMIN_ENDPOINTS = {
+    ("GET", "/api/dashboard/stats/knowledge"),
+}
+
+
+@app.middleware("http")
+async def enforce_knowledge_base_permissions(request: Request, call_next):
+    user = request_user(request)
+    request.state.rag_user = user
+    path_parts = request.url.path.strip("/").split("/")
+    is_yuxi_admin_evaluation_dataset_route = (
+        path_parts[:3] == ["api", "evaluation", "datasets"]
+        and (
+            (request.method == "DELETE" and len(path_parts) == 4)
+            or (request.method == "GET" and len(path_parts) == 5 and path_parts[4] == "download")
+        )
+    )
+    if (
+        (request.method, request.url.path) in YUXI_SUPERADMIN_ENDPOINTS
+        and user["role"] != "superadmin"
+    ):
+        return JSONResponse(status_code=403, content={"detail": "需要超级管理员权限"})
+    if (
+        (request.method, request.url.path) in YUXI_ADMIN_ENDPOINTS
+        or is_yuxi_admin_evaluation_dataset_route
+        or (request.url.path == "/api/v1/knowledge-bases" and request.method == "POST")
+    ) and user["role"] not in {"admin", "superadmin"}:
+        return JSONResponse(status_code=403, content={"detail": "需要管理员权限"})
+
+    path = request.url.path
+    read_only_post = (
+        path in {"/api/v1/retrieve", "/api/v1/debug/retrieve"}
+        or path == "/api/knowledge/files/markdown"
+        or path.endswith(("/query", "/query-test", "/connection-test"))
+    )
+    is_external_read = "/api/knowledge/databases/external/" in path
+    required = ResourcePermission.READ if request.method in {"GET", "HEAD", "OPTIONS"} or read_only_post or is_external_read else ResourcePermission.MANAGE
+
+    for knowledge_base_id in await _request_knowledge_base_ids(request):
+        knowledge_base = db.get_knowledge_base(knowledge_base_id)
+        if not knowledge_base:
+            continue
+        try:
+            permission = permission_for(user, knowledge_base)
+            require_access(user, knowledge_base, required)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        request.state.rag_can_manage = permission == ResourcePermission.MANAGE
+
+    return await call_next(request)
 
 ALLOWED_UPLOADS = {
     ".pdf", ".txt", ".md", ".csv", ".json", ".html", ".htm",
@@ -185,6 +339,7 @@ def _merge_config(current: dict, incoming: dict) -> dict:
     if retrieval["vector_weight"] + retrieval["bm25_weight"] <= 0:
         raise ValueError("Vector 与 BM25 权重不能同时为 0")
     merged["retrieval"] = retrieval
+    merged["share_config"] = normalize_share_config(merged.get("share_config"))
     return merged
 
 
@@ -436,25 +591,33 @@ def _knowledge_base_or_404(knowledge_base_id: str) -> dict:
 
 
 @app.get("/api/v1/knowledge-bases")
-async def knowledge_bases():
-    return [_public_knowledge_base(item) for item in db.list_knowledge_bases()]
+async def knowledge_bases(request: Request):
+    user = request.state.rag_user
+    return [_public_knowledge_base(item) for item in db.list_knowledge_bases() if can_read(user, item)]
 
 
 @app.post("/api/v1/knowledge-bases")
-async def create_knowledge_base(request: KnowledgeBasePayload):
-    name = request.name.strip()
+async def create_knowledge_base(payload: KnowledgeBasePayload, http_request: Request):
+    name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="知识库名称不能为空")
     try:
-        config = _merge_config(db.default_knowledge_base_config(), request.config)
+        config = _merge_config(db.default_knowledge_base_config(), payload.config)
         _validate_model_config(config)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
-        knowledge_base = db.create_knowledge_base(name, request.description.strip(), request.kb_type)
+        user = http_request.state.rag_user
+        knowledge_base = db.create_knowledge_base(
+            name,
+            payload.description.strip(),
+            payload.kb_type,
+            created_by=user["uid"],
+            created_by_department_id=user.get("department_id"),
+        )
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail="知识库名称已存在") from exc
-    if request.config:
+    if payload.config:
         knowledge_base = db.update_knowledge_base(
             knowledge_base["id"], knowledge_base["name"], knowledge_base["description"], knowledge_base["kb_type"], config
         )
@@ -931,26 +1094,54 @@ async def reconcile_knowledge_graph(knowledge_base_id: str, mode: str = "failed"
 
 
 @app.post("/api/v1/knowledge-bases/{knowledge_base_id}/evaluation/datasets/upload")
-async def upload_evaluation_dataset(knowledge_base_id: str, file: UploadFile = File(...)):
+async def upload_evaluation_dataset(
+    knowledge_base_id: str,
+    file: UploadFile = File(...),
+    name: str = Form(""),
+    description: str = Form(""),
+):
     _knowledge_base_or_404(knowledge_base_id)
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="评估集最大 10 MB")
     suffix = Path(file.filename or "").suffix.lower()
     try:
-        if suffix == ".json":
+        if suffix == ".jsonl":
+            cases = []
+            for line_number, line in enumerate(content.decode("utf-8-sig").splitlines(), 1):
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                if not isinstance(item, dict) or "query" not in item:
+                    raise ValueError(f"第 {line_number} 行缺少 query 字段")
+                gold_ids = item.get("gold_chunk_ids") or []
+                cases.append({
+                    "query": item["query"],
+                    "gold_chunk_ids": gold_ids,
+                    "gold_answer": item.get("gold_answer"),
+                    "relevant_evidence_ids": [
+                        value if str(value).startswith("EV-") else f"EV-{value}"
+                        for value in gold_ids
+                    ],
+                    "top_k": 5,
+                    "filters": {},
+                })
+            dataset_name = name.strip() or Path(file.filename or "evaluation-dataset.jsonl").stem
+        elif suffix == ".json":
             value = json.loads(content.decode("utf-8-sig"))
             cases = value.get("cases", []) if isinstance(value, dict) else value
-            name = str(value.get("name") or Path(file.filename or "evaluation-dataset.json").stem) if isinstance(value, dict) else Path(file.filename or "evaluation-dataset.json").stem
+            dataset_name = name.strip() or (str(value.get("name") or Path(file.filename or "evaluation-dataset.json").stem) if isinstance(value, dict) else Path(file.filename or "evaluation-dataset.json").stem)
+            if isinstance(value, dict) and not description:
+                description = str(value.get("description") or "")
         elif suffix == ".csv":
             rows = csv.DictReader(io.StringIO(content.decode("utf-8-sig")))
             cases = []
             for row in rows:
                 raw_ids = row.get("relevant_evidence_ids") or row.get("evidence_ids") or ""
                 cases.append({"query": row.get("query", ""), "relevant_evidence_ids": [item.strip() for item in re.split(r"[|;；\n]", raw_ids) if item.strip()], "top_k": int(row.get("top_k") or 5)})
-            name = Path(file.filename or "evaluation-dataset.csv").stem
+            dataset_name = name.strip() or Path(file.filename or "evaluation-dataset.csv").stem
         else:
-            raise ValueError("只支持 JSON 或 CSV 评估集")
+            raise ValueError("只支持 JSONL、JSON 或 CSV 评估集")
         if not isinstance(cases, list) or not cases:
             raise ValueError("评估集必须包含 cases 数组")
         validated = [EvaluationCase.model_validate(item) for item in cases]
@@ -958,12 +1149,30 @@ async def upload_evaluation_dataset(knowledge_base_id: str, file: UploadFile = F
         raise HTTPException(status_code=422, detail=f"评估集格式无效：{exc}") from exc
     if len(validated) > 100:
         raise HTTPException(status_code=422, detail="评估集最多 100 条")
-    dataset = db.create_evaluation_dataset(knowledge_base_id, name[:120], [item.model_dump() for item in validated])
+    normalized_cases = [item.model_dump() for item in validated]
+    dataset = db.create_evaluation_dataset(
+        knowledge_base_id,
+        dataset_name[:120],
+        normalized_cases,
+        description=description[:1000],
+        build_metadata={
+            "source": "upload",
+            "status": "completed",
+            "progress": 100,
+            "filename": file.filename or "",
+        },
+    )
     return {
         "id": dataset["id"],
+        "dataset_id": dataset["dataset_id"],
         "knowledge_base_id": dataset["knowledge_base_id"],
         "name": dataset["name"],
-        "case_count": len(dataset["cases"]),
+        "description": dataset["description"],
+        "case_count": dataset["case_count"],
+        "item_count": dataset["item_count"],
+        "has_gold_chunks": dataset["has_gold_chunks"],
+        "has_gold_answers": dataset["has_gold_answers"],
+        "build_metadata": dataset["build_metadata"],
         "created_at": dataset["created_at"],
     }
 
@@ -980,9 +1189,10 @@ async def get_knowledge_base_evaluation_dataset(knowledge_base_id: str, dataset_
     dataset = db.get_evaluation_dataset(knowledge_base_id, dataset_id)
     if not dataset:
         raise HTTPException(status_code=404, detail="Evaluation dataset not found")
-    page = max(1, page)
-    page_size = max(1, min(page_size, 100))
-    return {**dataset, "total": len(dataset["cases"]), "page": page, "page_size": page_size,
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise HTTPException(status_code=400, detail="分页参数无效")
+    total = dataset["item_count"]
+    return {**dataset, "total": total, "page": page, "page_size": page_size,
             "cases": dataset["cases"][(page - 1) * page_size:page * page_size]}
 
 
@@ -1009,8 +1219,21 @@ async def run_knowledge_base_evaluation(knowledge_base_id: str, payload: Evaluat
         raise HTTPException(status_code=422, detail="请提供 cases 或 dataset_id")
     scoped_cases = [item.model_copy(update={"filters": {**item.filters, "knowledge_base_id": knowledge_base_id}}) for item in cases]
     result = await evaluation(EvaluationRequest(
-        cases=scoped_cases, search_mode=payload.search_mode, use_reranker=payload.use_reranker, recall_top_k=payload.recall_top_k
+        cases=scoped_cases,
+        search_mode=payload.search_mode,
+        use_reranker=payload.use_reranker,
+        recall_top_k=payload.recall_top_k,
+        answer_llm=payload.answer_llm,
+        judge_llm=payload.judge_llm,
     ))
+    result["name"] = payload.name
+    result["retrieval_config"] = {
+        "search_mode": payload.search_mode,
+        "use_reranker": payload.use_reranker,
+        "recall_top_k": payload.recall_top_k,
+        "answer_llm": payload.answer_llm,
+        "judge_llm": payload.judge_llm,
+    }
     return db.create_evaluation_run(knowledge_base_id, dataset_id, result)
 
 
@@ -1241,8 +1464,15 @@ async def delete_knowledge_base_document(knowledge_base_id: str, document_id: st
 
 
 @app.get("/api/v1/documents")
-async def documents():
-    return [_public_document(document) for document in db.list_documents()]
+async def documents(request: Request):
+    user = request.state.rag_user
+    visible = []
+    for document in db.list_documents():
+        knowledge_base_id = document.get("knowledge_base_id")
+        knowledge_base = db.get_knowledge_base(knowledge_base_id) if knowledge_base_id else None
+        if not knowledge_base_id or (knowledge_base and can_read(user, knowledge_base)):
+            visible.append(document)
+    return [_public_document(document) for document in visible]
 
 
 @app.get("/api/v1/documents/{document_id}/chunks")
@@ -1487,6 +1717,8 @@ async def debug_retrieve_api(request: RetrieveRequest):
 
 @app.post("/api/v1/evaluation/run")
 async def evaluation(request: EvaluationRequest):
+    if bool(request.answer_llm) != bool(request.judge_llm):
+        raise HTTPException(status_code=422, detail="答案生成模型和答案评判模型需要同时配置")
     cases = []
     for case in request.cases:
         retrieval_request = RetrieveRequest(
@@ -1507,20 +1739,76 @@ async def evaluation(request: EvaluationRequest):
                 result = await retrieve(retrieval_request)
         except (ProviderUnavailable, NotionAPIError, ValueError, httpx.HTTPError) as exc:
             raise _provider_error(exc) from exc
-        relevant = set(case.relevant_evidence_ids)
+        relevant_ids = case.relevant_evidence_ids or [
+            value if value.startswith("EV-") else f"EV-{value}"
+            for value in case.gold_chunk_ids
+        ]
+        relevant = set(relevant_ids)
         returned = [item.evidence_id for item in result.evidences]
+        retrieved_chunks = [item.model_dump() for item in result.evidences]
         yuxi_metrics = calculate_retrieval_metrics(
-            result.evidences, case.relevant_evidence_ids, case.top_k
+            result.evidences, relevant_ids, case.top_k
         )
         hits = [index for index, evidence_id in enumerate(returned, start=1) if evidence_id in relevant]
         reciprocal_rank = 1 / hits[0] if hits else 0.0
         dcg = sum(1 / math.log2(rank + 1) for rank in hits)
         ideal = sum(1 / math.log2(rank + 1) for rank in range(1, min(len(relevant), case.top_k) + 1))
+        generated_answer = ""
+        answer_metrics = {}
+        if request.answer_llm and case.gold_answer:
+            if retrieved_chunks:
+                context = "\n\n".join(
+                    f"文档 {index + 1}:\n{item.text}"
+                    for index, item in enumerate(result.evidences[:5])
+                    if item.text
+                )
+                answer_prompt = (
+                    "基于以下上下文信息，请回答用户的问题。\n\n"
+                    f"上下文信息：{context}\n\n用户问题：{case.query}\n\n"
+                    "请根据上下文信息准确回答问题。\n\n"
+                    "如果上下文中缺少相关信息，请回答“信息不足，无法回答”。"
+                )
+                judge_prompt = (
+                    "你是一个公正的评判者，请评估AI生成的答案相对于标准答案的准确性。\n\n"
+                    f"问题：{case.query}\n\n标准答案：\n{case.gold_answer}\n\n"
+                    f"AI生成的答案：\n{generated_answer}\n\n"
+                    "请判断AI生成的答案是否在事实层面与标准答案一致。忽略措辞、标点符号或格式上的细微差异。"
+                    "只关注核心事实是否准确包含。\n"
+                    '请只返回 JSON：{"score": 1.0, "reasoning": "简要说明判定理由"}。score 只能是 1.0 或 0.0。'
+                )
+                try:
+                    generated_answer = await complete_chat(
+                        [{"role": "user", "content": answer_prompt}], request.answer_llm
+                    )
+                    judged_text = await complete_chat([{"role": "user", "content": judge_prompt}], request.judge_llm)
+                    judged = json_repair.loads(judged_text)
+                    if not isinstance(judged, dict):
+                        raise ValueError("Judge 响应必须是 JSON 对象")
+                    score = float(judged.get("score", 0.0))
+                    if score not in {0.0, 1.0}:
+                        raise ValueError("Judge 响应的 score 必须为 0.0 或 1.0")
+                    answer_metrics = {"score": score, "reasoning": str(judged.get("reasoning") or "")}
+                except ChatProviderUnavailable as exc:
+                    raise HTTPException(status_code=503, detail=str(exc)) from exc
+                except httpx.HTTPError as exc:
+                    raise HTTPException(status_code=502, detail=f"答案评估模型请求失败：{exc}") from exc
+                except Exception as exc:
+                    raise HTTPException(status_code=502, detail=f"答案评估模型响应无效：{exc}") from exc
+            else:
+                answer_metrics = {"score": 0.0, "reasoning": "未生成答案"}
+        case_metrics = {**yuxi_metrics["yuxi_metrics"], **answer_metrics}
         cases.append(
             {
+                "item_index": len(cases),
                 "query": case.query,
                 "returned_evidence_ids": returned,
                 "relevant_evidence_ids": sorted(relevant),
+                "gold_chunk_ids": case.gold_chunk_ids,
+                "gold_answer": case.gold_answer,
+                "generated_answer": generated_answer,
+                "retrieved_chunks": retrieved_chunks,
+                "metrics": case_metrics,
+                "answer_metrics": answer_metrics,
                 "recall_at_k": yuxi_metrics["recall_at_k"],
                 "precision_at_k": yuxi_metrics["precision_at_k"],
                 "yuxi_metrics": yuxi_metrics["yuxi_metrics"],
@@ -1533,7 +1821,25 @@ async def evaluation(request: EvaluationRequest):
         metric: round(sum(case[metric] for case in cases) / len(cases), 6)
         for metric in ("recall_at_k", "precision_at_k", "mrr", "ndcg_at_k")
     }
-    return {"case_count": len(cases), "averages": averages, "cases": cases, "judge": "ground-truth evidence IDs; no LLM judge"}
+    metric_keys = next((case["metrics"].keys() for case in cases if case["metrics"]), ())
+    for metric in metric_keys:
+        values = [case["metrics"][metric] for case in cases if metric in case["metrics"]]
+        if values and all(isinstance(value, (int, float)) for value in values):
+            averages[metric] = round(sum(values) / len(values), 6)
+    judged_scores = [case["metrics"]["score"] for case in cases if "score" in case["metrics"]]
+    if judged_scores:
+        averages["answer_correctness"] = round(sum(judged_scores) / len(judged_scores), 6)
+        averages["overall_score"] = averages["answer_correctness"]
+    elif "recall@10" in averages:
+        averages["overall_score"] = averages["recall@10"]
+    return {
+        "case_count": len(cases),
+        "averages": averages,
+        "cases": cases,
+        "judge": request.judge_llm or "ground-truth evidence IDs; no LLM judge",
+        "answer_llm": request.answer_llm,
+        "judge_llm": request.judge_llm,
+    }
 
 
 @app.get("/api/v1/evidence/{evidence_id}")
