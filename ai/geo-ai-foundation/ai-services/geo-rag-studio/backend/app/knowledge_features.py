@@ -333,14 +333,18 @@ async def build_entity_graph(knowledge_base: dict) -> dict:
         .get("extractor_options", {})
     )
     base_url = str(options.get("base_url") or "").strip().rstrip("/")
-    model = str(options.get("model") or options.get("model_spec") or "").strip()
+    model_spec = str(options.get("model_spec") or "").strip()
+    model = str(options.get("model") or model_spec).strip()
     api_key = str(options.get("api_key") or "").strip()
-    if not base_url or not model or not api_key:
-        raise RuntimeError("图谱抽取 LLM 未配置；请填写 OpenAI-Compatible Base URL、模型和 API Key")
-    if urlparse(base_url).scheme not in {"http", "https"}:
+    if api_key and not base_url:
+        raise RuntimeError("图谱抽取 Base URL 未配置")
+    if base_url and (not model or not api_key):
+        raise RuntimeError("图谱抽取 LLM 配置不完整；请填写模型和 API Key")
+    if base_url and urlparse(base_url).scheme not in {"http", "https"}:
         raise ValueError("图谱 LLM Base URL 必须是 http 或 https")
 
-    endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+    endpoint = f"{base_url}/chat/completions" if base_url and not base_url.endswith("/chat/completions") else base_url
+    model_params = options.get("model_params") if isinstance(options.get("model_params"), dict) else {}
     schema = str(options.get("schema") or "").strip()
     system_prompt = (
         "请从地灾知识片段中抽取实体和实体关系，只返回严格 JSON，不要输出解释。"
@@ -373,20 +377,28 @@ async def build_entity_graph(knowledge_base: dict) -> dict:
         async def process_chunk(document: dict, chunk: dict) -> None:
             async with semaphore:
                 try:
-                    response = await client.post(
-                        endpoint,
-                        headers={"Authorization": f"Bearer {api_key}"},
-                        json={
-                            **(options.get("model_params") if isinstance(options.get("model_params"), dict) else {}),
-                            "model": model,
-                            "messages": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": chunk["text"]},
-                            ],
-                        },
-                    )
-                    response.raise_for_status()
-                    content = response.json()["choices"][0]["message"]["content"]
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": chunk["text"]},
+                    ]
+                    if base_url:
+                        response = await client.post(
+                            endpoint,
+                            headers={"Authorization": f"Bearer {api_key}"},
+                            json={
+                                **model_params,
+                                "messages": messages,
+                                **(
+                                    {"model": model, "temperature": model_params.get("temperature", 0)}
+                                ),
+                            },
+                        )
+                        response.raise_for_status()
+                        content = response.json()["choices"][0]["message"]["content"]
+                    else:
+                        content = await complete_chat(
+                            messages, model_spec or model or None, timeout=180.0, model_params=model_params
+                        )
                     content = re.sub(r"^\s*```(?:json)?|```\s*$", "", str(content), flags=re.IGNORECASE).strip()
                     extracted = json.loads(content)
                     if not isinstance(extracted, dict) or not isinstance(extracted.get("entities", []), list) or not isinstance(extracted.get("relations", []), list):

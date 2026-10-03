@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 from pathlib import Path
 
@@ -338,3 +339,55 @@ def test_yuxi_graph_retrieval_runs_through_local_debug_pipeline(tmp_path, monkey
     assert debug["graph_candidates"][0]["chunk_id"] == chunk["id"]
     assert debug["fusion_candidates"][0]["score_type"] == "yuxi_weighted_rrf_k60"
     assert debug["final_evidences"][0]["chunk_id"] == chunk["id"]
+
+
+def test_graph_build_uses_yuxi_chat_model_spec_without_per_kb_api_key(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(settings, "rag_db_path", str(tmp_path / "rag.sqlite3"))
+    monkeypatch.setattr(settings, "rag_upload_dir", str(tmp_path / "documents"))
+    monkeypatch.setattr(settings, "rag_workspace_dir", str(tmp_path / "workspace"))
+    monkeypatch.setattr(settings, "rag_search_backend", "sqlite")
+    Path(settings.rag_upload_dir).mkdir()
+    Path(settings.rag_workspace_dir).mkdir()
+    calls = []
+
+    async def complete_registered_model(messages, model_spec=None, *, timeout=60, model_params=None):
+        calls.append((messages, model_spec, model_params))
+        return json.dumps({"entities": [{"text": "斜坡裂缝", "label": "Hazard"}], "relations": []}, ensure_ascii=False)
+
+    monkeypatch.setattr(knowledge_features, "complete_chat", complete_registered_model)
+    with TestClient(app) as client:
+        knowledge_base = client.post(
+            "/api/v1/knowledge-bases", json={"name": "Registered graph model"}
+        ).json()
+        added = client.post(
+            "/api/v1/documents/text",
+            json={
+                "file_name": "hazard.txt",
+                "text": "斜坡裂缝在强降雨后扩大，需要开展现场复核。",
+                "knowledge_base_id": knowledge_base["id"],
+            },
+        )
+        assert added.status_code == 200, added.text
+        document_id = added.json()["document_id"]
+        configured = client.post(
+            f"/api/v1/knowledge-bases/{knowledge_base['id']}/graph-build/config",
+            json={
+                "extractor_type": "llm",
+                "extractor_options": {
+                    "model_spec": "siliconflow-cn:chat-model",
+                    "model_params": {"temperature": 0.15},
+                },
+            },
+        )
+        assert configured.status_code == 200, configured.text
+
+        built = client.post(f"/api/v1/knowledge-bases/{knowledge_base['id']}/graph-build/index")
+
+    assert built.status_code == 200, built.text
+    assert built.json()["structure_status"] == "indexed"
+    assert len(calls) == 1
+    assert calls[0][1] == "siliconflow-cn:chat-model"
+    assert calls[0][2] == {"temperature": 0.15}
+    graph = db.get_knowledge_view(knowledge_base["id"], "graph")["payload"]
+    entity = next(node for node in graph["nodes"] if node["type"] == "Hazard")
+    assert entity["source_document_ids"] == [document_id]

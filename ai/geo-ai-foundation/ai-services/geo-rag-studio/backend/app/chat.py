@@ -15,7 +15,13 @@ def _default_model_spec() -> str:
     return str(system.get("default_model") or "siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash")
 
 
-async def complete_chat(messages: list[dict], model_spec: str | None = None, *, timeout: float = 60) -> str:
+async def complete_chat(
+    messages: list[dict],
+    model_spec: str | None = None,
+    *,
+    timeout: float = 60,
+    model_params: dict | None = None,
+) -> str:
     selected = str(model_spec or _default_model_spec()).strip()
     config = resolve_runtime_config({"model": selected}, "chat")
     if not config.get("api_key") or not config.get("base_url") or not config.get("model"):
@@ -28,14 +34,12 @@ async def complete_chat(messages: list[dict], model_spec: str | None = None, *, 
     headers = dict(config.get("headers") or {})
     headers.setdefault("Authorization", f"Bearer {config['api_key']}")
     async with httpx.AsyncClient(timeout=timeout) as client:
+        request_body = {**(model_params or {}), "model": config["model"], "messages": messages}
+        request_body.setdefault("temperature", 0)
         response = await client.post(
             endpoint,
             headers=headers,
-            json={
-                "model": config["model"],
-                "messages": messages,
-                "temperature": 0,
-            },
+            json=request_body,
         )
         response.raise_for_status()
     choices = response.json().get("choices") or []
