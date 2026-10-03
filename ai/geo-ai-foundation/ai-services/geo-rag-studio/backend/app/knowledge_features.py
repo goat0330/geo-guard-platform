@@ -14,6 +14,7 @@ from . import db
 from .yuxi_port import _upstream  # noqa: F401
 from yuxi.knowledge.utils.mindmap_utils import (
     MINDMAP_GENERATION_FILE_LIMIT,
+    MINDMAP_FILE_PAGE_SIZE,
     MINDMAP_SYSTEM_PROMPT,
     MINDMAP_INCREMENTAL_SYSTEM_PROMPT,
     build_mindmap_user_message,
@@ -40,6 +41,16 @@ def mindmap_file_map(documents: list[dict]) -> dict:
         doc["id"]: {"filename": doc["file_name"], "type": Path(doc["file_name"]).suffix.lstrip(".").lower()}
         for doc in documents
     }
+
+
+def mindmap_document_page(documents: list[dict], tracked_ids: set[str] | None = None) -> tuple[list[dict], int]:
+    current = list(documents[:MINDMAP_FILE_PAGE_SIZE])
+    included = {document["id"] for document in current}
+    current.extend(
+        document for document in documents[MINDMAP_FILE_PAGE_SIZE:]
+        if document["id"] in (tracked_ids or set()) - included
+    )
+    return current, len(documents)
 
 
 def remove_document_from_mindmaps(document: dict) -> None:
@@ -318,6 +329,8 @@ async def generate_mindmap(knowledge_base: dict, document_ids: list[str] | None 
         .get("extractor_options", {})
     )
     all_documents = db.list_documents(knowledge_base_id)
+    saved_views = db.list_knowledge_views(knowledge_base_id, "mindmap")
+    saved_payload = saved_views[0]["payload"] if saved_views else None
     original_count = len(document_ids) if document_ids and not incremental else len(all_documents)
     if document_ids and not incremental:
         selected_ids = document_ids[:MINDMAP_GENERATION_FILE_LIMIT]
@@ -327,12 +340,18 @@ async def generate_mindmap(knowledge_base: dict, document_ids: list[str] | None 
         if missing_ids:
             raise ValueError(f"所选文件不存在：{len(missing_ids)} 个")
     else:
-        documents = all_documents if incremental else all_documents[:MINDMAP_GENERATION_FILE_LIMIT]
+        if incremental:
+            tracked_ids = set((saved_payload or {}).get("source_document_ids", []))
+            if not tracked_ids and saved_payload:
+                tracked_ids = set(detect_mindmap_changes(
+                    saved_payload.get("mindmap"), None, mindmap_file_map(all_documents)
+                )["tracked_files"])
+            documents, _ = mindmap_document_page(all_documents, tracked_ids)
+        else:
+            documents = all_documents[:MINDMAP_GENERATION_FILE_LIMIT]
     if not documents and not incremental:
         raise ValueError("知识库中没有文件")
 
-    saved_views = db.list_knowledge_views(knowledge_base_id, "mindmap")
-    saved_payload = saved_views[0]["payload"] if saved_views else None
     if incremental and not saved_payload:
         raise ValueError("知识库没有现有思维导图，请先全量生成")
 

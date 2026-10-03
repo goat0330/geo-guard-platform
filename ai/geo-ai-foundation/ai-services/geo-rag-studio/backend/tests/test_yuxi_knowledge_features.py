@@ -169,6 +169,29 @@ def test_mindmap_generation_applies_upstream_200_file_limit(tmp_path, monkeypatc
     assert result["original_file_count"] == 201 and result["truncated"] is True
 
 
+@pytest.mark.parametrize("tracked_index", [0, 500])
+def test_mindmap_diff_uses_upstream_500_file_window_and_keeps_tracked_files(tmp_path, monkeypatch, tracked_index):
+    from app import db
+
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "Mindmap paging", "kb_type": "local"}).json()["kb_id"]
+    documents = [{"id": f"DOC-{index}", "file_name": f"file-{index}.txt", "status": "uploaded"} for index in range(501)]
+    tracked = documents[tracked_index]
+    db.save_knowledge_view(kb_id, "mindmap", "", {
+        "mindmap": {"content": "KB", "children": [{"content": tracked["file_name"], "children": []}]},
+        "source_document_ids": [tracked["id"]], "source_document_names": {tracked["id"]: tracked["file_name"]},
+        "source_fingerprint": "unchanged",
+    })
+    monkeypatch.setattr(db, "list_documents", lambda _kb_id: documents)
+    monkeypatch.setattr("app.main.indexed_content_fingerprint", lambda _ids: "unchanged")
+    diff = client.get(f"/api/knowledge/databases/{kb_id}/mindmap/diff").json()
+    assert diff["tracked_files"] == [tracked["id"]]
+    assert diff["current_total"] == 501
+    assert len(diff["current_files"]) == (501 if tracked_index == 500 else 500)
+    assert diff["current_files_truncated"] is (tracked_index == 0)
+    assert len(diff["added_files"]) == (499 if tracked_index == 0 else 500)
+
+
 def test_local_knowledge_management_views_retrieval_and_evaluation(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     knowledge_base = client.post(

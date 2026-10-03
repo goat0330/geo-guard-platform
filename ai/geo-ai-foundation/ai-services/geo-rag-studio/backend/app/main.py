@@ -23,7 +23,7 @@ from .provider_store import resolve_runtime_config
 from .embedding import embed_texts, enabled as embedding_enabled, value as embedding_value
 from .parser import parse_pdf_layout, parse_pdf_mineru, parse_pdf_mineru_official, render_pdf_page
 from .pipeline import index_existing_document, ingest_file, ingest_pdf, ingest_text, parse_existing_document
-from .knowledge_features import build_entity_graph, generate_mindmap, index_knowledge_graph_vectors, indexed_content_fingerprint, mindmap_file_map, remove_document_from_mindmaps
+from .knowledge_features import build_entity_graph, generate_mindmap, index_knowledge_graph_vectors, indexed_content_fingerprint, mindmap_document_page, mindmap_file_map, remove_document_from_mindmaps
 from .retrieval import ProviderUnavailable, retrieve, retrieve_debug
 from .yuxi_port.rerank import enabled as reranker_enabled, rerank
 from .yuxi_port import _upstream  # noqa: F401
@@ -737,8 +737,17 @@ async def get_knowledge_base_mindmap(knowledge_base_id: str, document_id: str | 
 async def knowledge_base_mindmap_diff(knowledge_base_id: str):
     _knowledge_base_or_404(knowledge_base_id)
     views = db.list_knowledge_views(knowledge_base_id, "mindmap")
-    current_documents = db.list_documents(knowledge_base_id)
+    all_documents = db.list_documents(knowledge_base_id)
     saved = views[0]["payload"] if views else None
+    tracked_ids = set((saved or {}).get("source_document_ids", []))
+    if not tracked_ids and saved:
+        tracked_names = saved.get("source_document_names") or {}
+        tracked_ids = set(tracked_names)
+        if not tracked_ids:
+            tracked_ids = set(detect_mindmap_changes(
+                saved.get("mindmap"), None, mindmap_file_map(all_documents)
+            )["tracked_files"])
+    current_documents, current_total = mindmap_document_page(all_documents, tracked_ids)
     current_files = mindmap_file_map(current_documents)
     current_ids = set(current_files)
     tracked_names = (saved or {}).get("source_document_names") or {
@@ -756,8 +765,8 @@ async def knowledge_base_mindmap_diff(knowledge_base_id: str):
         "removed_file_ids": sorted(changes["removed_file_ids"]),
         "needs_update": changes["needs_update"] or has_content_changes,
         "changed": has_content_changes,
-        "current_total": len(current_ids),
-        "current_files_truncated": False,
+        "current_total": current_total,
+        "current_files_truncated": len(current_files) < current_total,
         "current_fingerprint": current_fingerprint,
         "saved_fingerprint": saved.get("source_fingerprint") if saved else None,
         "kb_id": knowledge_base_id,
