@@ -65,6 +65,110 @@ def _client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
+@pytest.mark.parametrize("add_file", [False, True])
+def test_legacy_mindmap_diff_recovers_tracking_from_upstream_leaf_names(tmp_path, monkeypatch, add_file):
+    from app import db
+
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "Legacy mindmap", "kb_type": "local"}).json()["kb_id"]
+    first = client.post("/api/v1/documents/text", json={"knowledge_base_id": kb_id, "file_name": "tracked.txt", "text": "Rainfall slope inspection."}).json()["document_id"]
+    # Saved legacy fixture with no ID map or fingerprint, not model generation.
+    db.save_knowledge_view(kb_id, "mindmap", "", {"mindmap": {
+        "content": "Legacy", "children": [{"content": "tracked.txt", "children": []}],
+    }})
+    added_id = None
+    if add_file:
+        added_id = client.post("/api/v1/documents/text", json={"knowledge_base_id": kb_id, "file_name": "new.txt", "text": "New inspection."}).json()["document_id"]
+    diff = client.get(f"/api/knowledge/databases/{kb_id}/mindmap/diff").json()
+    assert diff["tracked_files"] == [first]
+    assert diff["unchanged_count"] == 1
+    assert diff["removed_file_ids"] == []
+    assert [item["file_id"] for item in diff["added_files"]] == ([added_id] if add_file else [])
+    assert diff["needs_update"] is add_file
+    assert client.delete(f"/api/knowledge/databases/{kb_id}/documents/{first}").status_code == 200
+    saved = client.get(f"/api/knowledge/databases/{kb_id}/mindmap").json()
+    assert saved["mindmap"]["children"] == []
+    assert saved["source_document_ids"] == []
+
+
+def test_native_mindmap_file_list_includes_uploaded_files_and_upstream_envelope(tmp_path, monkeypatch):
+    from app import db
+
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "File organization", "kb_type": "local"}).json()["kb_id"]
+    document = db.create_document("unparsed.pdf", None, "application/pdf", "pymupdf-layout", "general", {}, {}, knowledge_base_id=kb_id)
+    response = client.get(f"/api/knowledge/databases/{kb_id}/mindmap/files")
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload, dict), "Yuxi frontend reads response.files, not a bare array"
+    assert payload["kb_id"] == kb_id and payload["db_name"] == "File organization"
+    assert payload["total"] == 1 and payload["truncated"] is False
+    assert payload["files"][0]["file_id"] == document
+    assert payload["files"][0]["filename"] == "unparsed.pdf"
+    assert payload["files"][0]["type"] == "pdf"
+    assert payload["files"][0]["status"] == "uploaded"
+    diff = client.get(f"/api/knowledge/databases/{kb_id}/mindmap/diff").json()
+    assert diff["added_files"][0]["file_id"] == document
+
+
+def test_mindmap_generation_uses_upstream_file_list_prompts_and_parser(tmp_path, monkeypatch):
+    from app import db, knowledge_features
+    from yuxi.knowledge.utils.mindmap_utils import (
+        MINDMAP_SYSTEM_PROMPT, MINDMAP_INCREMENTAL_SYSTEM_PROMPT,
+        build_mindmap_user_message, build_mindmap_incremental_user_message,
+    )
+
+    client = _client(tmp_path, monkeypatch)
+    kb_id = client.post("/api/knowledge/databases", json={"database_name": "File organization", "kb_type": "local"}).json()["kb_id"]
+    doc = db.create_document("unparsed.pdf", None, "application/pdf", "pymupdf-layout", "general", {}, {}, knowledge_base_id=kb_id)
+    tree = {"content": "File organization", "children": [{"content": "unparsed.pdf", "children": []}]}
+    calls = []
+    async def unit_model(client, options, messages):
+        calls.append(messages)
+        return "```json\n" + json.dumps(tree) + "\n```"
+    monkeypatch.setattr(knowledge_features, "_chat_completion", unit_model)
+    generated = client.post(f"/api/knowledge/databases/{kb_id}/mindmap/generate", json={"file_ids": [doc], "user_prompt": "按用途分类"})
+    assert generated.status_code == 200, generated.text
+    assert calls == [[
+        {"role": "system", "content": MINDMAP_SYSTEM_PROMPT},
+        {"role": "user", "content": build_mindmap_user_message("File organization", [{"filename": "unparsed.pdf", "type": "pdf"}], "按用途分类")},
+    ]]
+    assert generated.json()["mindmap"] == tree
+    assert generated.json()["file_count"] == 1 and generated.json()["original_file_count"] == 1
+    assert generated.json()["truncated"] is False
+    previous_tree = json.loads(json.dumps(tree))
+    db.create_document("new.txt", None, "text/plain", "text", "general", {}, {}, knowledge_base_id=kb_id)
+    tree["children"].append({"content": "new.txt", "children": []})
+    updated = client.post(f"/api/knowledge/databases/{kb_id}/mindmap/generate", json={"incremental": True, "user_prompt": "保留分类"})
+    assert updated.status_code == 200, updated.text
+    assert calls[1] == [
+        {"role": "system", "content": MINDMAP_INCREMENTAL_SYSTEM_PROMPT},
+        {"role": "user", "content": build_mindmap_incremental_user_message("File organization", previous_tree, [{"filename": "new.txt", "type": "txt"}], "保留分类")},
+    ]
+    unchanged = client.post(f"/api/knowledge/databases/{kb_id}/mindmap/generate", json={"incremental": True})
+    assert unchanged.status_code == 200 and unchanged.json()["no_ai_needed"] is True
+    assert unchanged.json()["no_changes"] is True and len(calls) == 2
+
+
+def test_mindmap_generation_applies_upstream_200_file_limit(tmp_path, monkeypatch):
+    import asyncio
+    from app import db, knowledge_features
+    from yuxi.knowledge.utils.mindmap_utils import MINDMAP_GENERATION_FILE_LIMIT
+
+    _client(tmp_path, monkeypatch)
+    documents = [{"id": f"unit-{index}", "file_name": f"file-{index}.txt"} for index in range(MINDMAP_GENERATION_FILE_LIMIT + 1)]
+    monkeypatch.setattr(db, "list_documents", lambda kb_id: documents)
+    monkeypatch.setattr(knowledge_features, "_fingerprint", lambda ids: "unit-fingerprint")
+    async def unit_model(client, options, messages):
+        assert "file-199.txt" in messages[1]["content"]
+        assert "file-200.txt" not in messages[1]["content"]
+        return json.dumps({"content": "Limit", "children": [{"content": item["file_name"], "children": []} for item in documents[:MINDMAP_GENERATION_FILE_LIMIT]]})
+    monkeypatch.setattr(knowledge_features, "_chat_completion", unit_model)
+    result = asyncio.run(knowledge_features.generate_mindmap({"id": "unit-kb", "name": "Limit"}))
+    assert result["file_count"] == 200 and len(result["source_document_ids"]) == 200
+    assert result["original_file_count"] == 201 and result["truncated"] is True
+
+
 def test_local_knowledge_management_views_retrieval_and_evaluation(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     knowledge_base = client.post(

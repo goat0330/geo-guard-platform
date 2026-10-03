@@ -2,6 +2,7 @@ import hashlib
 import asyncio
 import json
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -11,7 +12,17 @@ from .embedding import embed_batched, enabled as embedding_enabled
 
 from . import db
 from .yuxi_port import _upstream  # noqa: F401
-from yuxi.knowledge.utils.mindmap_utils import remove_files_from_mindmap
+from yuxi.knowledge.utils.mindmap_utils import (
+    MINDMAP_GENERATION_FILE_LIMIT,
+    MINDMAP_SYSTEM_PROMPT,
+    MINDMAP_INCREMENTAL_SYSTEM_PROMPT,
+    build_mindmap_user_message,
+    build_mindmap_incremental_user_message,
+    collect_mindmap_files,
+    detect_mindmap_changes,
+    parse_mindmap_content,
+    remove_files_from_mindmap,
+)
 
 
 def _fingerprint(document_ids: list[str]) -> str:
@@ -24,6 +35,13 @@ def indexed_content_fingerprint(document_ids: list[str]) -> str:
     return _fingerprint(document_ids)
 
 
+def mindmap_file_map(documents: list[dict]) -> dict:
+    return {
+        doc["id"]: {"filename": doc["file_name"], "type": Path(doc["file_name"]).suffix.lstrip(".").lower()}
+        for doc in documents
+    }
+
+
 def remove_document_from_mindmaps(document: dict) -> None:
     """Prune stored trees using Yuxi's helper; preserve prior content staleness."""
     knowledge_base_id = document["knowledge_base_id"]
@@ -32,10 +50,14 @@ def remove_document_from_mindmaps(document: dict) -> None:
         tree = payload.get("mindmap")
         if not tree:
             continue
-        ids = payload.get("source_document_ids", view["source_id"].split(","))
+        ids = payload.get("source_document_ids", view["source_id"].split(",") if view["source_id"] else [])
+        names = payload.get("source_document_names") or {}
+        if not ids and not names:
+            current_files = mindmap_file_map(db.list_documents(knowledge_base_id))
+            ids = detect_mindmap_changes(tree, None, current_files)["tracked_files"]
+            names = {item: current_files[item]["filename"] for item in ids}
         if document["id"] not in ids:
             continue
-        names = payload.get("source_document_names") or {}
         removed_name = names.get(document["id"], document["file_name"])
         remaining = [item for item in ids if item != document["id"]]
         updated = {
@@ -286,14 +308,6 @@ async def _chat_completion(client: httpx.AsyncClient, options: dict, messages: l
     return str(response.json()["choices"][0]["message"]["content"])
 
 
-def _parse_json_response(content: str) -> dict:
-    cleaned = re.sub(r"^\s*```(?:json)?|```\s*$", "", content, flags=re.IGNORECASE).strip()
-    parsed = json.loads(cleaned)
-    if not isinstance(parsed, dict):
-        raise ValueError("模型响应必须是 JSON 对象")
-    return parsed
-
-
 async def generate_mindmap(knowledge_base: dict, document_ids: list[str] | None = None,
                            user_prompt: str = "", incremental: bool = False) -> dict:
     knowledge_base_id = knowledge_base["id"]
@@ -303,17 +317,19 @@ async def generate_mindmap(knowledge_base: dict, document_ids: list[str] | None 
         .get("graph_build_config", {})
         .get("extractor_options", {})
     )
-    all_documents = [doc for doc in db.list_documents(knowledge_base_id) if doc["status"] == "indexed"]
-    if document_ids:
-        wanted = set(document_ids)
+    all_documents = db.list_documents(knowledge_base_id)
+    original_count = len(document_ids) if document_ids and not incremental else len(all_documents)
+    if document_ids and not incremental:
+        selected_ids = document_ids[:MINDMAP_GENERATION_FILE_LIMIT]
+        wanted = set(selected_ids)
         documents = [doc for doc in all_documents if doc["id"] in wanted]
         missing_ids = wanted - {doc["id"] for doc in documents}
         if missing_ids:
-            raise ValueError(f"所选文件不存在或尚未入库：{len(missing_ids)} 个")
+            raise ValueError(f"所选文件不存在：{len(missing_ids)} 个")
     else:
-        documents = all_documents
+        documents = all_documents if incremental else all_documents[:MINDMAP_GENERATION_FILE_LIMIT]
     if not documents and not incremental:
-        raise ValueError("没有已入库文件可生成思维导图")
+        raise ValueError("知识库中没有文件")
 
     saved_views = db.list_knowledge_views(knowledge_base_id, "mindmap")
     saved_payload = saved_views[0]["payload"] if saved_views else None
@@ -322,52 +338,38 @@ async def generate_mindmap(knowledge_base: dict, document_ids: list[str] | None 
 
     document_names = {doc["id"]: doc["file_name"] for doc in all_documents}
     current_ids = [doc["id"] for doc in documents]
-    previous_ids = set((saved_payload or {}).get("source_document_ids", []))
+    current_files = mindmap_file_map(documents)
+    previous_names = (saved_payload or {}).get("source_document_names") or {
+        item: document_names.get(item, "") for item in (saved_payload or {}).get("source_document_ids", [])
+    }
+    changes = detect_mindmap_changes((saved_payload or {}).get("mindmap"), previous_names, current_files)
+    previous_ids = set(changes["tracked_files"])
     current_id_set = set(current_ids)
     added_ids = [item for item in current_ids if item not in previous_ids]
     removed_ids = previous_ids - current_id_set
     current_fingerprint = _fingerprint(current_ids)
-    content_changed = bool(saved_payload and saved_payload.get("source_fingerprint") != current_fingerprint)
-    if incremental and saved_payload and not added_ids and not removed_ids and not content_changed:
+    if incremental and saved_payload and not changes["needs_update"]:
         return {**saved_payload, "no_ai_needed": True, "no_changes": True}
 
     existing_mindmap = (saved_payload or {}).get("mindmap")
     if incremental and existing_mindmap and removed_ids:
-        previous_names = (saved_payload or {}).get("source_document_names", {})
         removed_names = {previous_names.get(item, "") for item in removed_ids}
 
         existing_mindmap = remove_files_from_mindmap(existing_mindmap, removed_names)
-    refresh_all = incremental and content_changed and not added_ids and not removed_ids
     generation_docs = [
         doc for doc in documents
-        if not incremental or doc["id"] in added_ids or refresh_all
+        if not incremental or doc["id"] in added_ids
     ]
-    source_texts = []
-    for document in generation_docs:
-        chunks = db.get_chunks(document["id"], include_embedding=False)
-        excerpt = "\n".join(item["text"] for item in chunks[:8])[:5000]
-        source_texts.append(f"文件：{document['file_name']}\n内容摘录：\n{excerpt}")
-    source_text = "\n\n".join(source_texts)
-
-    system_prompt = (
-        "你是知识库整理助手。只根据给出的文件名和内容摘录生成 2-4 层思维导图，"
-        "只返回严格 JSON 对象，结构为 {\"content\":\"知识库名称\",\"children\":[...] }。"
-        "所有节点使用 content 和 children 字段；叶子节点必须是文件名，且每个文件名只出现一次。"
-    )
+    files_info = collect_mindmap_files(current_files, [doc["id"] for doc in generation_docs])
     if incremental and existing_mindmap:
-        user_message = (
-            f"知识库：{knowledge_base['name']}\n现有思维导图：{json.dumps(existing_mindmap, ensure_ascii=False)}\n"
-            f"新增文件内容：\n{source_text}\n用户补充说明：{user_prompt}\n"
-            "保留原分类，将新增文件放入最合适位置；返回完整的新思维导图 JSON。"
-        )
+        system_prompt = MINDMAP_INCREMENTAL_SYSTEM_PROMPT
+        user_message = build_mindmap_incremental_user_message(knowledge_base["name"], existing_mindmap, files_info, user_prompt)
     else:
-        user_message = (
-            f"知识库：{knowledge_base['name']}\n文件内容：\n{source_text}\n"
-            f"用户补充说明：{user_prompt}\n每个文件名只能在叶子节点出现一次，不得遗漏。"
-        )
+        system_prompt = MINDMAP_SYSTEM_PROMPT
+        user_message = build_mindmap_user_message(knowledge_base["name"], files_info, user_prompt)
     if generation_docs:
         async with httpx.AsyncClient(timeout=180.0) as client:
-            mindmap = _parse_json_response(await _chat_completion(client, options, [
+            mindmap = parse_mindmap_content(await _chat_completion(client, options, [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ]))
@@ -400,6 +402,9 @@ async def generate_mindmap(knowledge_base: dict, document_ids: list[str] | None 
         "source_fingerprint": current_fingerprint,
         "mindmap": mindmap,
         "generation": "openai-compatible-llm-mindmap",
-        "no_ai_needed": False,
+        "file_count": len(documents),
+        "original_file_count": original_count,
+        "truncated": len(documents) < original_count,
+        "no_ai_needed": not generation_docs,
         "no_changes": False,
     }

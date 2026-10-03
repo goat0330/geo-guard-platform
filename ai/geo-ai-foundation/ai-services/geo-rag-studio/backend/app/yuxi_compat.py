@@ -31,6 +31,7 @@ from .yuxi_port.chunk_presets import get_options
 from .parser import parse_file_markdown
 from .pipeline import document_processing_params
 from yuxi.knowledge.utils.kb_utils import calculate_content_hash, params_for_uploaded_document
+from yuxi.knowledge.utils.mindmap_utils import MINDMAP_FILE_PAGE_SIZE, build_database_file_list
 
 router = APIRouter()
 STAGE_URI = "local-stage://"
@@ -1787,7 +1788,22 @@ async def yuxi_mindmap_databases():
 
 @router.get("/api/knowledge/databases/{knowledge_base_id}/mindmap/files")
 async def yuxi_mindmap_files(knowledge_base_id: str):
-    return [_yuxi_document(item) for item in await rag.mindmap_files(knowledge_base_id)]
+    knowledge_base = rag._knowledge_base_or_404(knowledge_base_id)
+    documents = await rag.mindmap_files(knowledge_base_id)
+    files = {
+        item["id"]: {
+            "filename": item["file_name"],
+            "type": Path(item["file_name"]).suffix.lower().lstrip("."),
+            "status": _yuxi_document_status(item),
+            "created_at": item.get("created_at", ""),
+        }
+        for item in documents[:MINDMAP_FILE_PAGE_SIZE]
+    }
+    return {
+        "message": "success", "kb_id": knowledge_base_id, "slug": knowledge_base_id,
+        "db_name": knowledge_base["name"], "files": build_database_file_list(files),
+        "total": len(documents), "truncated": len(documents) > len(files),
+    }
 
 
 @router.post("/api/knowledge/databases/{knowledge_base_id}/mindmap/generate")

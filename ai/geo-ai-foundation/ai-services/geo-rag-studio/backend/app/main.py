@@ -23,13 +23,14 @@ from .provider_store import resolve_runtime_config
 from .embedding import embed_texts, enabled as embedding_enabled, value as embedding_value
 from .parser import parse_pdf_layout, parse_pdf_mineru, parse_pdf_mineru_official, render_pdf_page
 from .pipeline import index_existing_document, ingest_file, ingest_pdf, ingest_text, parse_existing_document
-from .knowledge_features import build_entity_graph, generate_mindmap, index_knowledge_graph_vectors, indexed_content_fingerprint, remove_document_from_mindmaps
+from .knowledge_features import build_entity_graph, generate_mindmap, index_knowledge_graph_vectors, indexed_content_fingerprint, mindmap_file_map, remove_document_from_mindmaps
 from .retrieval import ProviderUnavailable, retrieve, retrieve_debug
 from .yuxi_port.rerank import enabled as reranker_enabled, rerank
 from .yuxi_port import _upstream  # noqa: F401
 from yuxi.knowledge.implementations.dify import DifyKB
 from yuxi.knowledge.implementations.notion import NOTION_API_BASE, NotionAPIError, NotionKB
 from yuxi.knowledge.read_models import KnowledgeBaseConfig
+from yuxi.knowledge.utils.mindmap_utils import detect_mindmap_changes
 from .yuxi_port.evaluation import calculate_retrieval_metrics
 from .schemas import (
     EmbeddingTestRequest,
@@ -694,7 +695,7 @@ async def save_sample_questions(knowledge_base_id: str, payload: dict):
 @app.get("/api/v1/knowledge-bases/{knowledge_base_id}/mindmap/files")
 async def mindmap_files(knowledge_base_id: str):
     _knowledge_base_or_404(knowledge_base_id)
-    return [_public_document(item) for item in db.list_documents(knowledge_base_id) if item["status"] == "indexed"]
+    return [_public_document(item) for item in db.list_documents(knowledge_base_id)]
 
 
 @app.post("/api/v1/knowledge-bases/{knowledge_base_id}/mindmap/generate")
@@ -736,29 +737,25 @@ async def get_knowledge_base_mindmap(knowledge_base_id: str, document_id: str | 
 async def knowledge_base_mindmap_diff(knowledge_base_id: str):
     _knowledge_base_or_404(knowledge_base_id)
     views = db.list_knowledge_views(knowledge_base_id, "mindmap")
-    current_documents = [item for item in db.list_documents(knowledge_base_id) if item["status"] == "indexed"]
+    current_documents = db.list_documents(knowledge_base_id)
     saved = views[0]["payload"] if views else None
-    current_by_id = {item["id"]: item for item in current_documents}
-    current_ids = set(current_by_id)
-    tracked_ids = set((saved or {}).get("source_document_ids", []))
-    added_ids = current_ids - tracked_ids
-    removed_ids = tracked_ids - current_ids
-    added_files = [
-        {"file_id": item, "filename": current_by_id[item]["file_name"], "type": current_by_id[item].get("mime_type", "")}
-        for item in sorted(added_ids)
-    ]
+    current_files = mindmap_file_map(current_documents)
+    current_ids = set(current_files)
+    tracked_names = (saved or {}).get("source_document_names") or {
+        item: current_files.get(item, {}).get("filename", "")
+        for item in (saved or {}).get("source_document_ids", [])
+    }
+    changes = detect_mindmap_changes((saved or {}).get("mindmap"), tracked_names, current_files)
     current_fingerprint = indexed_content_fingerprint(sorted(current_ids))
-    has_content_changes = bool(saved and saved.get("source_fingerprint") != current_fingerprint)
+    has_content_changes = bool(saved and saved.get("source_fingerprint") and saved["source_fingerprint"] != current_fingerprint)
     return {
-        "has_mindmap": bool(saved),
+        **changes,
         "generated": bool(saved),
-        "tracked_files": sorted(tracked_ids),
+        "tracked_files": sorted(changes["tracked_files"]),
         "current_files": sorted(current_ids),
-        "added_files": added_files,
-        "removed_file_ids": sorted(removed_ids),
-        "unchanged_count": len(current_ids & tracked_ids),
-        "needs_update": bool(added_ids or removed_ids or has_content_changes),
-        "changed": bool(saved and saved.get("source_fingerprint") != current_fingerprint),
+        "removed_file_ids": sorted(changes["removed_file_ids"]),
+        "needs_update": changes["needs_update"] or has_content_changes,
+        "changed": has_content_changes,
         "current_total": len(current_ids),
         "current_files_truncated": False,
         "current_fingerprint": current_fingerprint,
